@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------- Gerador SEI
+# Pastas fora do escopo deste repositorio
+extensao_gerador_sei/
+testes_extensao/
+
+# Dados do usuario e estado de execucao
+uploads/
+csv/
+downloads/
+Anexos/
+keepalive.json
+relatorio_gerador_sei.csv
+
+# Banco SQLite local
+processos_sei.db
+processos_sei.db-journal
+processos_sei.db-wal
+processos_sei.db-shm

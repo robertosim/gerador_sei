@@ -1,0 +1,1430 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerador de Processo e Anexador SEI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a6a3a'/%3E%3Ctext x='8' y='12' font-size='10' text-anchor='middle' fill='white' font-family='sans-serif'%3ES%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/sei-style.css') }}">
+</head>
+<body>
+    <div class="header">
+        <h1><span>Gerador SEI</span> Painel de Controle</h1>
+    </div>
+
+    <nav class="abas">
+        <button type="button" class="aba ativa" data-aba="gerar">Gerar</button>
+        <button type="button" class="aba" data-aba="baixar">Baixar</button>
+        <button type="button" class="aba" data-aba="anexar">Anexar</button>
+        <button type="button" class="aba" data-aba="log">Log</button>
+    </nav>
+
+    <div class="container">
+
+        <!-- ==================================================== ABA GERAR -->
+        <section id="aba-gerar" class="conteudo ativa">
+            <div class="config-section">
+                <div class="config-header" onclick="toggleGerar()">
+                    <h2>Gerar Processos (CSV &rarr; SEI)</h2>
+                    <span class="arrow open" id="gerar-arrow">&#9660;</span>
+                </div>
+                <div class="config-body open" id="gerar-body">
+                    <div class="form-grid">
+                        <div class="form-group full">
+                            <label>Tipo do Processo</label>
+                            <select id="gerar-tipo">
+                                <option value="">&nbsp;</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Especificacao (coringas: {{ '{{Nome Titular 1}}' }})</label>
+                            <input type="text" id="gerar-especificacao" placeholder="Ex: CCIR {{ '{{Nome Titular 1}}' }}">
+                        </div>
+                        <div class="form-group">
+                            <label>Interessados</label>
+                            <input type="text" id="gerar-interessados" placeholder="Ex: {{ '{{Nome Titular 1}}' }}">
+                        </div>
+                        <div class="form-group full">
+                            <label>Observacoes desta unidade</label>
+                            <input type="text" id="gerar-observacoes">
+                        </div>
+                        <div class="form-group full">
+                            <label>Nivel de Acesso</label>
+                            <div class="radio-group">
+                                <label><input type="radio" name="gerar-nivel" value="0"> Publico</label>
+                                <label><input type="radio" name="gerar-nivel" value="1" checked> Restrito</label>
+                                <label><input type="radio" name="gerar-nivel" value="2"> Sigiloso</label>
+                            </div>
+                        </div>
+                        <div class="form-group full">
+                            <label>Hipotese Legal</label>
+                            <select id="gerar-hipotese">
+                                <option value="">&nbsp;</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div style="margin-top: 16px; text-align: right;">
+                        <button class="btn" onclick="salvarGerarConfig()">Salvar Configuracao</button>
+                    </div>
+
+                    <div class="sei-actions" style="margin-top: 16px;">
+                        <button class="btn btn-secondary" onclick="carregarCsvGeracao()">1. Carregar CSV da pasta csv/</button>
+                        <button class="btn" style="background:#5c0a0a;" onclick="limparFilaGeracao()">Limpar Tudo</button>
+                        <button class="btn" id="btn-gerar" onclick="alternarGeracao()">2. Iniciar Geracao</button>
+                        <button class="btn btn-danger oculto" id="btn-cancelar-gerar" onclick="cancelarGeracao()">Cancelar</button>
+                        <button class="btn btn-secondary oculto" id="btn-gerar-retry" onclick="retryGeracao()">Tentar Novamente (Falhas)</button>
+                        <button class="btn btn-success" id="btn-exportar-gerar" onclick="exportarRelatorio()">Exportar</button>
+                    </div>
+
+                    <div class="progresso" id="progresso-gerar">
+                        <div class="barra-progresso">
+                            <div class="preenchimento" id="gerar-preenchimento"></div>
+                            <span class="pct" id="gerar-pct">0%</span>
+                        </div>
+                        <div class="prog-contador oculto" id="gerar-contador">gerando 0 de 0</div>
+                    </div>
+
+                    <div class="exec-texto" id="gerar-texto">&nbsp;</div>
+                    <div class="exec-atual" id="gerar-atual"></div>
+                    <div class="exec-erros oculto" id="gerar-erros"></div>
+
+                    <div class="linha-stats" id="gerar-stats">
+                        Fila: <b id="gerar-total">0</b> &nbsp;|&nbsp; Gerados: <b id="gerar-gerados">0</b>
+                        &nbsp;|&nbsp; Pendentes: <b id="gerar-pendentes">0</b>
+                        &nbsp;|&nbsp; Falhas: <b id="gerar-falha">0</b>
+                    </div>
+
+                    <div class="table-container" style="margin-top: 16px;">
+                        <div class="table-header">
+                            <h2>Fila de Geracao</h2>
+                            <button class="btn btn-secondary" onclick="carregarGeracaoRegistros()">Atualizar</button>
+                        </div>
+                        <div class="scroll-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Codigo</th>
+                                        <th>Nome</th>
+                                        <th>NUP Gerado</th>
+                                        <th>Status</th>
+                                        <th>Erro</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gerar-tabela-corpo">
+                                    <tr><td colspan="5" style="text-align:center;color:#666;padding:20px;">Nenhum registro</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- =================================================== ABA BAIXAR -->
+        <section id="aba-baixar" class="conteudo">
+            <div class="sei-panel">
+                <div class="sei-header">
+                    <h2>Downloads da PGT (Espelho da Unidade Familiar)</h2>
+                </div>
+                <div class="sei-body">
+                    <div class="sei-actions">
+                        <button class="btn" id="btn-baixar" onclick="alternarBaixar()">Baixar</button>
+                        <button class="btn btn-danger oculto" id="btn-cancelar-download" onclick="cancelarBaixar()">Cancelar</button>
+                        <button class="btn btn-secondary oculto" id="btn-retry-download" onclick="retryBaixar()">Executar novamente (erros)</button>
+                        <button class="btn btn-secondary" onclick="carregarBaixarRegistros()">Atualizar</button>
+                    </div>
+
+                    <div class="progresso" id="progresso-baixar">
+                        <div class="barra-progresso">
+                            <div class="preenchimento" id="baixar-preenchimento"></div>
+                            <span class="pct" id="baixar-pct">0%</span>
+                        </div>
+                        <div class="prog-contador oculto" id="baixar-contador">baixando 0 de 0</div>
+                    </div>
+
+                    <div class="exec-texto" id="baixar-texto">&nbsp;</div>
+                    <div class="exec-atual" id="baixar-atual"></div>
+                    <div class="exec-erros oculto" id="baixar-erros"></div>
+
+                    <div class="linha-stats" id="baixar-stats">
+                        Total: <b id="bx-total">0</b> &nbsp;|&nbsp; Baixados: <b id="bx-baixados">0</b>
+                        &nbsp;|&nbsp; Erros: <b id="bx-erros">0</b> &nbsp;|&nbsp; Pendentes: <b id="bx-pendentes">0</b>
+                    </div>
+
+                    <div class="exec-texto">Os codigos vem do CSV da aba <b>Gerar</b>; os espelhos sao salvos
+                        na pasta <b>downloads/</b>.</div>
+
+                    <div class="table-container" style="margin-top: 16px;">
+                        <div class="table-header">
+                            <h2>Fila de Downloads</h2>
+                        </div>
+                        <div class="scroll-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Codigo</th>
+                                        <th>Nome</th>
+                                        <th>Status</th>
+                                        <th>Arquivo</th>
+                                        <th>Erro</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="baixar-tabela-corpo">
+                                    <tr><td colspan="5" style="text-align:center;color:#666;padding:20px;">Nenhum registro</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- =================================================== ABA ANEXAR -->
+        <section id="aba-anexar" class="conteudo">
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="number" id="stat-total">0</div>
+                    <div class="label">Total de Registros</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="stat-com-pdf">0</div>
+                    <div class="label">Com PDF Anexado</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="stat-sem-pdf">0</div>
+                    <div class="label">Sem PDF</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="stat-com-processo">0</div>
+                    <div class="label">Com Processo SEI</div>
+                </div>
+            </div>
+
+            <div class="panels">
+                <div class="panel">
+                    <h2>1. Carregar CSV</h2>
+                    <div class="upload-area" id="csv-upload-area">
+                        <input type="file" id="csv-file" accept=".csv" onchange="uploadCSV(this)">
+                        <div class="icon">&#128196;</div>
+                        <div class="text">Arraste ou clique para selecionar o <b>CSV</b></div>
+                        <div class="file-name" id="csv-filename"></div>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h2>2. Carregar Anexos PDF</h2>
+                    <div class="upload-area" id="pdf-upload-area">
+                        <input type="file" id="pdf-files" accept=".pdf" multiple webkitdirectory onchange="uploadPDFs(this)">
+                        <div class="icon">&#128194;</div>
+                        <div class="text">Selecione a <b>pasta com os PDFs</b></div>
+                        <div class="file-name" id="pdf-filename"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <div class="config-header" onclick="toggleConfig()">
+                    <h2>Configuracoes do Anexo SEI</h2>
+                    <span class="arrow open" id="config-arrow">&#9660;</span>
+                </div>
+                <div class="config-body open" id="config-body">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Tipo do Documento</label>
+                            <select id="cfg-serie">
+                                <option value="null">&nbsp;</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Grau de Sigilo</label>
+                            <select id="cfg-sigilo">
+                                <option value="null">&nbsp;</option>
+                                <option value="R">Reservado</option>
+                                <option value="U">Urgente</option>
+                                <option value="S">Sigiloso</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Nome na Arvore</label>
+                            <input type="text" id="cfg-nome-arvore" placeholder="Ex: CCIR">
+                        </div>
+                        <div class="form-group">
+                            <label>Hipotese Legal</label>
+                            <select id="cfg-hipotese">
+                                <option value="null">&nbsp;</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group full">
+                            <label>Nivel de Acesso</label>
+                            <div class="radio-group">
+                                <label><input type="radio" name="cfg-nivel" value="0"> Publico</label>
+                                <label><input type="radio" name="cfg-nivel" value="1" checked> Restrito</label>
+                                <label><input type="radio" name="cfg-nivel" value="2"> Sigiloso</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 16px; text-align: right;">
+                        <button class="btn" onclick="salvarConfig()">Salvar Configuracoes</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sei-panel">
+                <div class="sei-header">
+                    <h2>3. Anexar no SEI</h2>
+                </div>
+                <div class="sei-body">
+                    <div class="sei-actions">
+                        <button class="btn" id="btn-anexar" onclick="alternarAnexar()">Anexar no SEI</button>
+                        <button class="btn btn-danger oculto" id="btn-cancelar-anexar" onclick="cancelarAnexar()">Cancelar</button>
+                        <button class="btn btn-secondary oculto" id="btn-retry" onclick="retryFalhas()">Tentar Novamente (Falhas)</button>
+                        <button class="btn" style="background:#5c0a0a;" onclick="limparRegistros()">Limpar registros</button>
+                    </div>
+
+                    <div class="progresso" id="progresso-anexar">
+                        <div class="barra-progresso">
+                            <div class="preenchimento" id="ax-preenchimento"></div>
+                            <span class="pct" id="ax-pct">0%</span>
+                        </div>
+                        <div class="prog-contador oculto" id="ax-contador">anexando 0 de 0</div>
+                    </div>
+
+                    <div class="exec-texto" id="ax-texto">&nbsp;</div>
+                    <div class="exec-atual" id="ax-atual"></div>
+                    <div class="exec-erros oculto" id="ax-erros"></div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <div class="table-header">
+                    <h2>Registros</h2>
+                    <div style="display:flex; gap:12px; align-items:center;">
+                        <input type="text" class="search-box" placeholder="Buscar por código, nome, NUP, tipo documento..." oninput="filterTable(this.value)">
+                        <button class="btn btn-secondary" onclick="carregarRegistros()">Atualizar</button>
+                    </div>
+                </div>
+                <div class="loading" id="loading">Carregando...</div>
+                <div class="scroll-table" id="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Código SIPRA</th>
+                                <th>Nome</th>
+                                <th>NUP Processo</th>
+                                <th>Tipo Documento</th>
+                                <th>Nome na Árvore</th>
+                                <th>PDF Anexo</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tabela-corpo">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ====================================================== ABA LOG -->
+        <section id="aba-log" class="conteudo">
+            <div class="sei-panel">
+                <div class="sei-header">
+                    <h2>Log unificado (Gerar | Baixar | Anexar)</h2>
+                </div>
+                <div class="sei-body">
+                    <div class="sei-actions">
+                        <button class="btn btn-secondary" onclick="carregarLog()">Atualizar</button>
+                        <button class="btn" style="background:#5c0a0a;" onclick="limparLog()">Limpar log</button>
+                    </div>
+                    <div class="sei-log active" id="log-unificado" style="max-height: 560px;"></div>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <footer class="rodape">
+        <span>Sessao SEI (keep-alive):</span>
+        <span id="ka-status" class="ka-status">-</span>
+        <label style="display:inline-flex; align-items:center; gap:6px;">a cada
+            <input type="number" id="ka-intervalo" min="30" step="10" value="60"
+                   style="width:70px; padding:4px 6px; border:1px solid #ccc; border-radius:6px;"
+                   onchange="keepaliveIntervalo()"> s
+        </label>
+        <button class="btn btn-secondary" id="ka-btn" onclick="keepaliveToggle()">Ativar/Desativar</button>
+        <button class="btn btn-secondary" onclick="keepaliveAgora()">Recarregar agora</button>
+    </footer>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let todosRegistros = [];
+        let stGerar = null;
+        let stBaixar = null;
+        let stAnexar = null;
+        let gerarRodandoAnterior = false;
+        let baixarRodandoAnterior = false;
+        let seiRodandoAnterior = false;
+
+        function $(id) { return document.getElementById(id); }
+
+        function esc(s) {
+            return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function showToast(msg, tipo) {
+            const t = $('toast');
+            t.textContent = msg;
+            t.className = 'toast toast-' + tipo + ' show';
+            setTimeout(() => t.classList.remove('show'), 4000);
+        }
+
+        async function postJson(url) {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            return await res.json().catch(() => ({}));
+        }
+
+        function erroOuToast(d, padrao) {
+            if (d && d.error) { showToast(d.error, 'error'); return false; }
+            if (d && d.success) return true;
+            showToast(padrao || 'Erro de conexao', 'error');
+            return false;
+        }
+
+        // ------------------------------------------------------------ abas
+        function configurarAbas() {
+            document.querySelectorAll('.abas .aba').forEach(btn => {
+                btn.addEventListener('click', () => abrirAba(btn.dataset.aba));
+            });
+        }
+
+        function abrirAba(nome) {
+            document.querySelectorAll('.abas .aba').forEach(b =>
+                b.classList.toggle('ativa', b.dataset.aba === nome));
+            document.querySelectorAll('.conteudo').forEach(s =>
+                s.classList.toggle('ativa', s.id === 'aba-' + nome));
+            if (nome === 'log') carregarLog();
+        }
+
+        // ------------------------------------------------------- progresso
+        function renderProgresso(prefixo, s, rotulo) {
+            const total = Number(s && s.total) || 0;
+            const feitos = Number(s && s.processados) || 0;
+            const pct = total ? Math.min(100, Math.round((feitos / total) * 100)) : 0;
+            $(prefixo + '-preenchimento').style.width = pct + '%';
+            $(prefixo + '-pct').textContent = pct + '%';
+            const contador = $(prefixo + '-contador');
+            const rodando = !!(s && s.rodando);
+            contador.classList.toggle('oculto', !rodando);
+            if (rodando) contador.textContent = `${rotulo} ${feitos} de ${total || '?'}`;
+        }
+
+        function renderExec(prefixo, s) {
+            const texto = $(prefixo + '-texto');
+            const atual = $(prefixo + '-atual');
+            const caixa = $(prefixo + '-erros');
+            if (!s || (!s.rodando && !Number(s.total) && !s.status_final)) {
+                texto.innerHTML = '&nbsp;';
+                atual.textContent = '';
+                if (caixa) { caixa.classList.add('oculto'); caixa.textContent = ''; }
+                return;
+            }
+            const total = Number(s.total) || 0;
+            const feitos = Number(s.processados) || 0;
+            texto.textContent = `${feitos}/${total || '?'} processados | Sucesso: ${s.sucesso || 0}`
+                + ` | Falha: ${s.falha || 0}`
+                + (s.pausado ? ' | PAUSADO' : '')
+                + (s.rodando ? '' : ` | ${s.status_final || 'concluido'}`);
+            const passo = (s.rodando && s.passo)
+                ? ` | passo ${s.passo}: ${s.passo_desc || '-'}`
+                : '';
+            atual.textContent = (s.atual ? `Atual: ${s.atual}` : '')
+                + (s.rodando ? '' : (s.status_final ? `Status: ${s.status_final}` : ''))
+                + passo;
+            const erros = (s.erros || []).slice(-3);
+            if (caixa) {
+                if (erros.length) {
+                    caixa.classList.remove('oculto');
+                    caixa.textContent = erros.map(e =>
+                        `${e.cod || e.cod_sipra || '-'}: ${e.erro}`).join('\n');
+                } else {
+                    caixa.classList.add('oculto');
+                    caixa.textContent = '';
+                }
+            }
+        }
+
+        function ocupadoEm(outros) {
+            return outros.some(s => s && s.rodando);
+        }
+
+        // -------------------------------------------------------- estatisticas
+        async function atualizarStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const s = await res.json();
+                $('stat-total').textContent = s.total;
+                $('stat-com-pdf').textContent = s.com_pdf;
+                $('stat-sem-pdf').textContent = s.sem_pdf;
+                $('stat-com-processo').textContent = s.com_processo;
+            } catch (e) { /* ignora */ }
+        }
+
+        // ----------------------------------------------------------- GERAR
+        function toggleGerar() {
+            $('gerar-body').classList.toggle('open');
+            $('gerar-arrow').classList.toggle('open');
+        }
+
+        async function alternarGeracao() {
+            if (stGerar && stGerar.rodando) {
+                const d = await postJson('/api/gerar/pausar');
+                if (erroOuToast(d, 'Erro ao pausar')) showToast('Geracao ' + (d.pausado ? 'pausada' : 'retomada'), 'success');
+                return;
+            }
+            iniciarGeracao();
+        }
+
+        async function cancelarGeracao() {
+            if (!confirm('Cancelar a geracao? Os processos ja gerados sao mantidos.')) return;
+            const d = await postJson('/api/gerar/cancelar');
+            if (erroOuToast(d, 'Erro ao cancelar')) showToast('Geracao cancelada', 'success');
+        }
+
+        function exportarRelatorio() {
+            window.location.href = '/api/gerar/exportar';
+        }
+
+        async function carregarTiposProcesso() {
+            try {
+                const res = await fetch('/api/tipos-processo');
+                const tipos = await res.json();
+                const sel = $('gerar-tipo');
+                sel.innerHTML = '<option value="">&nbsp;</option>';
+                tipos.forEach(t => {
+                    const opt = document.createElement('option');
+                    opt.value = t.codigo;
+                    // o nome ja pode trazer "- SIGILOSO"; so marca se faltar
+                    const marcado = /SIGILOS/i.test(t.nome || '');
+                    opt.textContent = t.nome + (t.sigiloso && !marcado ? ' (Sigiloso)' : '');
+                    sel.appendChild(opt);
+                });
+            } catch (e) {
+                console.error('Erro ao carregar tipos de processo:', e);
+            }
+        }
+
+        async function carregarGerarConfig() {
+            await Promise.all([carregarTiposProcesso(), carregarHipotesesLegais()]);
+            try {
+                const res = await fetch('/api/gerar/config');
+                const cfg = await res.json();
+                $('gerar-tipo').value = cfg.tipo_processo || '';
+                $('gerar-especificacao').value = cfg.especificacao || '';
+                $('gerar-interessados').value = cfg.interessados || '';
+                $('gerar-observacoes').value = cfg.observacoes || '';
+                $('gerar-hipotese').value = cfg.hipotese_legal ?? '4';
+                const nivel = cfg.nivel_acesso || '1';
+                document.querySelectorAll('input[name="gerar-nivel"]').forEach(r => {
+                    r.checked = r.value === nivel;
+                });
+            } catch (e) {
+                console.error('Erro ao carregar config de geracao:', e);
+            }
+        }
+
+        async function salvarGerarConfig() {
+            const cfg = {
+                tipo_processo: $('gerar-tipo').value,
+                especificacao: $('gerar-especificacao').value,
+                interessados: $('gerar-interessados').value,
+                observacoes: $('gerar-observacoes').value,
+                nivel_acesso: document.querySelector('input[name="gerar-nivel"]:checked')?.value || '1',
+                hipotese_legal: $('gerar-hipotese').value
+            };
+            try {
+                const res = await fetch('/api/gerar/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cfg)
+                });
+                const data = await res.json();
+                showToast(data.success ? 'Configuracao de geracao salva!' : (data.error || 'Erro ao salvar'),
+                    data.success ? 'success' : 'error');
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function carregarCsvGeracao() {
+            try {
+                const res = await fetch('/api/gerar/carregar-csv', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`${(data.arquivos || []).join(', ')}: ${data.inseridos} novo(s), ${data.atualizados} atualizado(s)`, 'success');
+                    carregarGeracaoRegistros();
+                    carregarBaixarRegistros();
+                } else {
+                    showToast(data.error || 'Erro ao carregar CSV', 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function iniciarGeracao() {
+            const btn = $('btn-gerar');
+            btn.disabled = true;
+            btn.textContent = 'Iniciando...';
+            try {
+                const res = await fetch('/api/gerar/iniciar', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Geracao iniciada! ' + data.pendentes + ' registro(s) na fila', 'success');
+                } else {
+                    showToast(data.error || 'Erro ao iniciar', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '2. Iniciar Geracao';
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+                btn.disabled = false;
+                btn.textContent = '2. Iniciar Geracao';
+            }
+        }
+
+        async function pollGeracao() {
+            try {
+                const res = await fetch('/api/gerar/status');
+                const s = await res.json();
+                stGerar = s;
+
+                renderProgresso('gerar', s, 'gerando');
+                renderExec('gerar', s);
+
+                const gerados = Number(s.gerados) || 0;
+                const pendentes = Number(s.pendentes) || 0;
+                const falhas = Number(s.falhas_db) || 0;
+                $('gerar-total').textContent = gerados + pendentes;
+                $('gerar-gerados').textContent = gerados;
+                $('gerar-pendentes').textContent = Math.max(0, pendentes - falhas);
+                $('gerar-falha').textContent = falhas;
+
+                const ocupado = ocupadoEm([stBaixar, stAnexar]);
+                const btn = $('btn-gerar');
+                const cancelar = $('btn-cancelar-gerar');
+                const retry = $('btn-gerar-retry');
+                if (s.rodando) {
+                    btn.disabled = ocupado;
+                    btn.textContent = s.pausado ? 'Continuar' : 'Pausar';
+                    cancelar.classList.remove('oculto');
+                    retry.classList.add('oculto');
+                } else if (s.status_final === 'pausado') {
+                    btn.disabled = ocupado;
+                    btn.textContent = 'Continuar';
+                    cancelar.classList.remove('oculto');
+                } else {
+                    btn.disabled = ocupado;
+                    btn.textContent = '2. Iniciar Geracao';
+                    cancelar.classList.add('oculto');
+                    retry.classList.toggle('oculto', !(falhas > 0 && !ocupado));
+                }
+
+                if (gerarRodandoAnterior && !s.rodando) {
+                    carregarGeracaoRegistros();
+                    carregarRegistros();
+                    carregarBaixarRegistros();
+                    showToast(`Geracao ${s.status_final || 'finalizada'}! Sucesso: ${s.sucesso} | Falha: ${s.falha}`,
+                        s.falha > 0 ? 'error' : 'success');
+                }
+                gerarRodandoAnterior = !!s.rodando;
+            } catch (e) {
+                console.error('Erro ao pollar geracao:', e);
+            }
+        }
+
+        async function carregarGeracaoRegistros() {
+            try {
+                const res = await fetch('/api/gerar/registros');
+                const regs = await res.json();
+                const tbody = $('gerar-tabela-corpo');
+                if (!regs.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#666;padding:20px;">Nenhum registro</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = regs.map(r => {
+                    let badge;
+                    if (r.status === 1) badge = '<span class="badge badge-ok">Gerado</span>';
+                    else if (r.status === -1) badge = '<span class="badge badge-erro">Erro</span>';
+                    else badge = '<span class="badge badge-pendente">Pendente</span>';
+                    return `<tr>
+                        <td><b>${esc(r.cod_beneficiario)}</b></td>
+                        <td>${esc(r.nome) || '<span style="color:#666">-</span>'}</td>
+                        <td>${esc(r.processo_gerado) || '<span style="color:#666">-</span>'}</td>
+                        <td>${badge}</td>
+                        <td style="max-width:300px;font-size:12px;color:#a33;word-break:break-word;">${esc(r.erro)}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                console.error('Erro ao carregar fila de geracao:', e);
+            }
+        }
+
+        async function retryGeracao() {
+            try {
+                const d = await postJson('/api/gerar/retry');
+                if (d.success) {
+                    showToast(d.resetados + ' falha(s) resetada(s)', 'success');
+                    $('btn-gerar-retry').classList.add('oculto');
+                    carregarGeracaoRegistros();
+                }
+            } catch (e) {
+                showToast('Erro ao resetar falhas', 'error');
+            }
+        }
+
+        function recarregarInterfaceGeracao() {
+            $('gerar-texto').innerHTML = '&nbsp;';
+            $('gerar-atual').textContent = '';
+            $('gerar-preenchimento').style.width = '0%';
+            $('gerar-pct').textContent = '0%';
+            $('gerar-contador').classList.add('oculto');
+            $('btn-gerar-retry').classList.add('oculto');
+            $('btn-cancelar-gerar').classList.add('oculto');
+            const btn = $('btn-gerar');
+            btn.disabled = false;
+            btn.textContent = '2. Iniciar Geracao';
+            carregarGeracaoRegistros();
+            carregarBaixarRegistros();
+            pollGeracao();
+        }
+
+        async function limparFilaGeracao() {
+            if (!confirm('Tem certeza que deseja limpar tudo? Isso apaga a Fila de Geracao e os Registros.')) return;
+            try {
+                const [resFila, resRegs] = await Promise.all([
+                    fetch('/api/gerar/limpar', { method: 'POST' }),
+                    fetch('/api/limpar', { method: 'POST' })
+                ]);
+                const dFila = await resFila.json().catch(() => ({}));
+                const dRegs = await resRegs.json().catch(() => ({}));
+                if (dFila.success && dRegs.success) {
+                    showToast(`Tudo limpo! Fila: ${dFila.removidos} registro(s) removido(s)`, 'success');
+                    recarregarInterfaceGeracao();
+                    carregarRegistros();
+                } else {
+                    showToast(dFila.error || dRegs.error || 'Erro ao limpar', 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function limparRegistros() {
+            if (stAnexar && stAnexar.rodando) {
+                showToast('Pare a anexacao antes de limpar os registros', 'error');
+                return;
+            }
+            if (!confirm('Limpar os registros de anexacao? PDFs vinculados e status serao perdidos.')) return;
+            try {
+                const d = await (await fetch('/api/limpar', { method: 'POST' })).json().catch(() => ({}));
+                if (d.success) {
+                    showToast('Registros de anexacao limpos', 'success');
+                    carregarRegistros();
+                    atualizarStats();
+                } else {
+                    showToast(d.error || 'Erro ao limpar', 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function limparLog() {
+            if (!confirm('Limpar o log unificado (Gerar | Baixar | Anexar)?')) return;
+            try {
+                const d = await (await fetch('/api/log', { method: 'POST' })).json().catch(() => ({}));
+                if (d.success) {
+                    showToast('Log limpo', 'success');
+                    carregarLog();
+                } else {
+                    showToast(d.error || 'Erro ao limpar o log', 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        // ---------------------------------------------------------- BAIXAR
+        async function alternarBaixar() {
+            if (stBaixar && stBaixar.rodando) {
+                const d = await postJson('/api/baixar/pausar');
+                if (erroOuToast(d, 'Erro ao pausar')) showToast('Download ' + (d.pausado ? 'pausado' : 'retomado'), 'success');
+                return;
+            }
+            iniciarBaixar();
+        }
+
+        async function iniciarBaixar() {
+            const btn = $('btn-baixar');
+            btn.disabled = true;
+            btn.textContent = 'Iniciando...';
+            try {
+                const res = await fetch('/api/baixar/iniciar', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Download iniciado! ' + data.pendentes + ' espelho(s) na fila', 'success');
+                    $('btn-cancelar-download').classList.remove('oculto');
+                } else {
+                    showToast(data.error || 'Erro ao iniciar', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Baixar';
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Baixar';
+            }
+        }
+
+        async function cancelarBaixar() {
+            if (!confirm('Cancelar os downloads? O progresso sera zerado (os registros ficam na fila).')) return;
+            try {
+                const d = await postJson('/api/baixar/cancelar');
+                if (erroOuToast(d, 'Erro ao cancelar')) {
+                    showToast('Downloads cancelados; progresso zerado', 'success');
+                    carregarBaixarRegistros();
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function retryBaixar() {
+            try {
+                const d = await postJson('/api/baixar/retry');
+                if (d.success) {
+                    showToast(d.resetados + ' download(s) marcado(s) para repetir', 'success');
+                    $('btn-retry-download').classList.add('oculto');
+                    carregarBaixarRegistros();
+                }
+            } catch (e) {
+                showToast('Erro ao resetar falhas', 'error');
+            }
+        }
+
+        async function pollBaixar() {
+            try {
+                const res = await fetch('/api/baixar/status');
+                const s = await res.json();
+                stBaixar = s;
+
+                renderProgresso('baixar', s, 'baixando');
+                renderExec('baixar', s);
+
+                $('bx-total').textContent = s.total_db ?? 0;
+                $('bx-baixados').textContent = s.baixados ?? 0;
+                $('bx-erros').textContent = s.falhas_db ?? 0;
+                $('bx-pendentes').textContent = s.pendentes ?? 0;
+
+                const ocupado = ocupadoEm([stGerar, stAnexar]);
+                const btn = $('btn-baixar');
+                const cancelar = $('btn-cancelar-download');
+                const retry = $('btn-retry-download');
+                const temProgresso = (s.baixados ?? 0) > 0 || (s.falhas_db ?? 0) > 0;
+                if (s.rodando) {
+                    btn.disabled = ocupado;
+                    btn.textContent = s.pausado ? 'Continuar' : 'Pausar';
+                    cancelar.classList.remove('oculto');
+                    retry.classList.add('oculto');
+                } else if (s.status_final === 'pausado') {
+                    btn.disabled = ocupado;
+                    btn.textContent = 'Continuar';
+                    cancelar.classList.remove('oculto');
+                } else {
+                    btn.disabled = ocupado;
+                    btn.textContent = 'Baixar';
+                    cancelar.classList.toggle('oculto', !(temProgresso && !ocupado));
+                    retry.classList.toggle('oculto', !((s.falhas_db ?? 0) > 0 && !ocupado));
+                }
+
+                if (baixarRodandoAnterior && !s.rodando) {
+                    carregarBaixarRegistros();
+                    showToast(`Downloads ${s.status_final || 'finalizados'}! Sucesso: ${s.sucesso} | Falha: ${s.falha}`,
+                        s.falha > 0 ? 'error' : 'success');
+                }
+                baixarRodandoAnterior = !!s.rodando;
+            } catch (e) {
+                console.error('Erro ao pollar downloads:', e);
+            }
+        }
+
+        async function carregarBaixarRegistros() {
+            try {
+                const res = await fetch('/api/gerar/registros');
+                const regs = await res.json();
+                const tbody = $('baixar-tabela-corpo');
+                if (!regs.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#666;padding:20px;">Nenhum registro (carregue o CSV na aba Gerar)</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = regs.map(r => {
+                    const d = Number(r.download || 0);
+                    let badge, arquivo, erro;
+                    if (d === 1) {
+                        badge = '<span class="badge badge-ok">Baixado</span>';
+                        arquivo = esc(r.arquivo_download || '') || '<span style="color:#666">-</span>';
+                        erro = '<span style="color:#666">-</span>';
+                    } else if (d === -1) {
+                        badge = '<span class="badge badge-erro">Erro</span>';
+                        arquivo = esc(r.arquivo_download || '') || '<span style="color:#666">-</span>';
+                        erro = `<span style="max-width:320px;font-size:12px;color:#a33;word-break:break-word;">${esc(r.erro_download || '')}</span>`;
+                    } else {
+                        badge = '<span class="badge badge-pendente">Pendente</span>';
+                        arquivo = '<span style="color:#666">-</span>';
+                        erro = '<span style="color:#666">-</span>';
+                    }
+                    return `<tr>
+                        <td><b>${esc(r.cod_beneficiario)}</b></td>
+                        <td>${esc(r.nome) || '<span style="color:#666">-</span>'}</td>
+                        <td>${badge}</td>
+                        <td>${arquivo}</td>
+                        <td>${erro}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                console.error('Erro ao carregar fila de downloads:', e);
+            }
+        }
+
+        // ---------------------------------------------------------- ANEXAR
+        async function alternarAnexar() {
+            if (stAnexar && stAnexar.rodando) {
+                const d = await postJson('/api/anexar/pausar');
+                if (erroOuToast(d, 'Erro ao pausar')) showToast('Anexacao ' + (d.pausado ? 'pausada' : 'retomada'), 'success');
+                return;
+            }
+            iniciarAnexacao();
+        }
+
+        async function cancelarAnexar() {
+            if (!confirm('Cancelar a anexacao? Os registros anexados sao mantidos.')) return;
+            const d = await postJson('/api/anexar/cancelar');
+            if (erroOuToast(d, 'Erro ao cancelar')) showToast('Anexacao cancelada', 'success');
+        }
+
+        async function iniciarAnexacao() {
+            const btn = $('btn-anexar');
+            btn.disabled = true;
+            btn.textContent = 'Iniciando...';
+            try {
+                const res = await fetch('/api/anexar', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Processo de anexacao iniciado!', 'success');
+                    $('btn-retry').classList.add('oculto');
+                } else {
+                    showToast(data.error || 'Erro ao iniciar', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Anexar no SEI';
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Anexar no SEI';
+            }
+        }
+
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/sei-status');
+                const s = await res.json();
+                stAnexar = s;
+
+                renderProgresso('ax', s, 'anexando');
+                renderExec('ax', s);
+
+                const ocupado = ocupadoEm([stGerar, stBaixar]);
+                const btn = $('btn-anexar');
+                const cancelar = $('btn-cancelar-anexar');
+                const retry = $('btn-retry');
+                if (s.rodando) {
+                    btn.disabled = ocupado;
+                    btn.textContent = s.pausado ? 'Continuar' : 'Pausar';
+                    cancelar.classList.remove('oculto');
+                    retry.classList.add('oculto');
+                } else if (s.status_final === 'pausado') {
+                    btn.disabled = ocupado;
+                    btn.textContent = 'Continuar';
+                    cancelar.classList.remove('oculto');
+                } else {
+                    btn.disabled = ocupado;
+                    btn.textContent = 'Anexar no SEI';
+                    cancelar.classList.add('oculto');
+                    if (seiRodandoAnterior) {
+                        carregarRegistros();
+                        showToast(`Anexacao ${s.status_final || 'finalizada'}! Sucesso: ${s.sucesso} | Falha: ${s.falha}`,
+                            s.falha > 0 ? 'error' : 'success');
+                    }
+                    retry.classList.toggle('oculto', !(s.falha > 0 && !ocupado));
+                }
+                seiRodandoAnterior = !!s.rodando;
+
+                // Atualizar badges da tabela em tempo real
+                if (s.sucesso_lista && s.sucesso_lista.length > 0) {
+                    const tbody = $('tabela-corpo');
+                    const rows = tbody.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const codCell = row.querySelector('td:first-child b');
+                        if (codCell && s.sucesso_lista.includes(codCell.textContent.trim())) {
+                            const statusCell = row.querySelector('td:last-child');
+                            if (statusCell && !statusCell.querySelector('.badge-ok')) {
+                                statusCell.innerHTML = '<span class="badge badge-ok">Anexado</span>';
+                            }
+                        }
+                    });
+                }
+
+                if (s.falha_lista && s.falha_lista.length > 0) {
+                    const tbody = $('tabela-corpo');
+                    const rows = tbody.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const codCell = row.querySelector('td:first-child b');
+                        if (codCell) {
+                            const cod = codCell.textContent.trim();
+                            const falha = s.falha_lista.find(f => f.cod_sipra === cod);
+                            if (falha) {
+                                const statusCell = row.querySelector('td:last-child');
+                                if (statusCell && !statusCell.querySelector('.badge-erro')) {
+                                    statusCell.innerHTML = '<span class="badge badge-erro">Erro</span>';
+                                    statusCell.title = falha.erro;
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Erro ao pollar status:', e);
+            }
+        }
+
+        async function retryFalhas() {
+            try {
+                const d = await postJson('/api/retry-falhas');
+                if (d.success) {
+                    showToast('Falhas resetadas. Pode tentar novamente.', 'success');
+                    $('btn-retry').classList.add('oculto');
+                    carregarRegistros();
+                }
+            } catch (e) {
+                showToast('Erro ao resetar falhas', 'error');
+            }
+        }
+
+        // ------------------------------------------------------------- LOG
+        async function carregarLog() {
+            try {
+                const res = await fetch('/api/log');
+                const data = await res.json();
+                const el = $('log-unificado');
+                const noFim = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+                el.innerHTML = (data.log || []).map(l => {
+                    if (/ERRO|FALHA|abortad/i.test(l)) return `<div class="log-erro">${esc(l)}</div>`;
+                    if (/AVISO/i.test(l)) return `<div class="log-warn">${esc(l)}</div>`;
+                    if (/SUCESSO|OK:/i.test(l)) return `<div class="log-ok">${esc(l)}</div>`;
+                    return `<div>${esc(l)}</div>`;
+                }).join('') || '<div>(log vazio)</div>';
+                if (noFim) el.scrollTop = el.scrollHeight;
+            } catch (e) {
+                console.error('Erro ao carregar log:', e);
+            }
+        }
+
+        // ---------------------------------------------------------- CONFIG
+        function toggleConfig() {
+            $('config-body').classList.toggle('open');
+            $('config-arrow').classList.toggle('open');
+        }
+
+        async function carregarTiposDocumento() {
+            try {
+                const res = await fetch('/api/tipos-documento');
+                const tipos = await res.json();
+                const sel = $('cfg-serie');
+                sel.innerHTML = '<option value="null">&nbsp;</option>';
+                tipos.forEach(t => {
+                    const opt = document.createElement('option');
+                    opt.value = t.codigo;
+                    opt.textContent = t.nome;
+                    sel.appendChild(opt);
+                });
+                return true;
+            } catch (e) {
+                console.error('Erro ao carregar tipos de documento:', e);
+                return false;
+            }
+        }
+
+        async function carregarHipotesesLegais() {
+            try {
+                const res = await fetch('/api/hipoteses-legais');
+                const hips = await res.json();
+                ['cfg-hipotese', 'gerar-hipotese'].forEach(id => {
+                    const sel = $(id);
+                    if (!sel) return;
+                    const vazio = id === 'cfg-hipotese' ? 'null' : '';
+                    sel.innerHTML = `<option value="${vazio}">&nbsp;</option>`;
+                    hips.forEach(h => {
+                        const opt = document.createElement('option');
+                        opt.value = h.codigo;
+                        opt.textContent = h.nome;
+                        sel.appendChild(opt);
+                    });
+                });
+                return true;
+            } catch (e) {
+                console.error('Erro ao carregar hipoteses legais:', e);
+                return false;
+            }
+        }
+
+        async function carregarConfig() {
+            await Promise.all([carregarTiposDocumento(), carregarHipotesesLegais()]);
+            try {
+                const res = await fetch('/api/config');
+                const cfg = await res.json();
+                $('cfg-serie').value = cfg.serie || '82';
+                $('cfg-sigilo').value = cfg.sigilo || 'R';
+                $('cfg-nome-arvore').value = cfg.nome_arvore || 'CCIR';
+                $('cfg-hipotese').value = cfg.hipotese || '4';
+                const nivel = cfg.nivel || '1';
+                document.querySelectorAll('input[name="cfg-nivel"]').forEach(r => {
+                    r.checked = r.value === nivel;
+                });
+            } catch (e) {
+                console.error('Erro ao carregar config:', e);
+            }
+        }
+
+        async function salvarConfig() {
+            const cfg = {
+                serie: $('cfg-serie').value,
+                sigilo: $('cfg-sigilo').value,
+                nome_arvore: $('cfg-nome-arvore').value,
+                hipotese: $('cfg-hipotese').value,
+                nivel: document.querySelector('input[name="cfg-nivel"]:checked')?.value || '1'
+            };
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cfg)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`Configuracoes salvas! ${data.registros_atualizados} registro(s) atualizado(s)`, 'success');
+                    carregarRegistros();
+                } else {
+                    showToast(data.error || 'Erro ao salvar', 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        // ----------------------------------------------------------- UPLOAD
+        async function uploadCSV(input) {
+            const file = input.files[0];
+            if (!file) return;
+            $('csv-filename').textContent = file.name;
+
+            const formAnex = new FormData();
+            formAnex.append('csv_file', file);
+            const formGerar = new FormData();
+            formGerar.append('csv_file', file);
+
+            try {
+                const [resAnex, resGerar] = await Promise.all([
+                    fetch('/api/upload-csv', { method: 'POST', body: formAnex }),
+                    fetch('/api/gerar/upload-csv', { method: 'POST', body: formGerar })
+                ]);
+                const dataAnex = await resAnex.json().catch(() => ({}));
+                const dataGerar = await resGerar.json().catch(() => ({}));
+
+                if (dataGerar.success) {
+                    showToast(`${file.name}: ${dataGerar.inseridos} novo(s), ${dataGerar.atualizados} atualizado(s) na Fila de Geracao`, 'success');
+                    abrirAba('gerar');
+                    carregarGeracaoRegistros();
+                    carregarBaixarRegistros();
+                } else {
+                    showToast(dataGerar.error || 'Erro ao carregar CSV na Fila de Geracao', 'error');
+                }
+                if (dataAnex.success) {
+                    carregarRegistros();
+                }
+            } catch (e) {
+                showToast('Erro de conexão', 'error');
+            }
+        }
+
+        async function uploadPDFs(input) {
+            const files = input.files;
+            if (!files || files.length === 0) return;
+            $('pdf-filename').textContent = files.length + ' arquivo(s) selecionado(s)';
+
+            const form = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                form.append('pdf_files', files[i]);
+            }
+
+            $('loading').classList.add('active');
+
+            try {
+                const res = await fetch('/api/upload-pdfs', { method: 'POST', body: form });
+                const data = await res.json();
+                $('loading').classList.remove('active');
+
+                if (data.success) {
+                    showToast(data.associados + ' PDF(s) associados, ' + data.ignorados + ' ignorado(s)', 'success');
+                    carregarRegistros();
+                } else {
+                    showToast(data.error || 'Erro ao carregar PDFs', 'error');
+                }
+            } catch (e) {
+                $('loading').classList.remove('active');
+                showToast('Erro de conexão', 'error');
+            }
+        }
+
+        // -------------------------------------------------------- REGISTROS
+        async function carregarRegistros() {
+            try {
+                const res = await fetch('/api/registros');
+                todosRegistros = await res.json();
+                renderizarTabela(todosRegistros);
+                atualizarStats();
+            } catch (e) {
+                showToast('Erro ao carregar registros', 'error');
+            }
+        }
+
+        function renderizarTabela(dados) {
+            const tbody = $('tabela-corpo');
+            if (dados.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#666;padding:40px;">Nenhum registro encontrado</td></tr>';
+                return;
+            }
+            tbody.innerHTML = dados.map(r => {
+                let statusBadge;
+                if (r.anexado === 1) {
+                    statusBadge = '<span class="badge badge-ok">Anexado</span>';
+                } else if (r.anexado === -1) {
+                    statusBadge = '<span class="badge badge-erro">Erro</span>';
+                } else {
+                    statusBadge = '<span class="badge badge-pendente">Pendente</span>';
+                }
+
+                const nup = r.processo_sei || r.processo_gerado || '';
+                const nupGerado = !r.processo_sei && r.processo_gerado;
+                const nupHtml = nup
+                    ? (nupGerado
+                        ? `<span style="color:#1a6a3a" title="NUP gerado na Geracao de Processos">${esc(nup)}</span>`
+                        : esc(nup))
+                    : '<span style="color:#666">-</span>';
+                return `<tr>
+                    <td><b>${r.cod_sipra}</b></td>
+                    <td class="editavel" data-campo="nome" data-id="${r.id}" data-valor="${r.nome || ''}">${r.nome || '<span style="color:#666">-</span>'}</td>
+                    <td class="editavel" data-campo="processo_sei" data-id="${r.id}" data-valor="${esc(nup)}">${nupHtml}</td>
+                    <td class="editavel" data-campo="tipo_documento" data-id="${r.id}" data-valor="${r.tipo_documento || ''}">${r.tipo_documento_nome || '<span style="color:#666">-</span>'}</td>
+                    <td class="editavel" data-campo="nome_arvore" data-id="${r.id}" data-valor="${r.nome_arvore || ''}">${r.nome_arvore_processado || '<span style="color:#666">-</span>'}</td>
+                    <td class="editavel" data-campo="pdf_anexo" data-id="${r.id}" data-valor="${r.pdf_anexo || ''}">${r.pdf_anexo || '<span style="color:#666">-</span>'}</td>
+                    <td>${statusBadge}</td>
+                </tr>`;
+            }).join('');
+
+            document.querySelectorAll('td.editavel').forEach(td => {
+                td.addEventListener('dblclick', iniciarEdicao);
+            });
+        }
+
+        function iniciarEdicao(e) {
+            const td = e.currentTarget;
+            if (td.querySelector('input')) return;
+
+            const campo = td.dataset.campo;
+            const id = td.dataset.id;
+            const valorAtual = td.dataset.valor;
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = valorAtual;
+            input.className = 'input-edicao';
+
+            td.textContent = '';
+            td.appendChild(input);
+            input.focus();
+            input.select();
+
+            const salvar = async () => {
+                const novoValor = input.value.trim();
+                td.textContent = novoValor || '<span style="color:#666">-</span>';
+                td.dataset.valor = novoValor;
+
+                if (novoValor !== valorAtual) {
+                    try {
+                        const res = await fetch('/api/atualizar-campo', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ id: id, campo: campo, valor: novoValor })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast('Campo atualizado!', 'success');
+                            const reg = todosRegistros.find(r => r.id == id);
+                            if (reg) reg[campo] = novoValor;
+                        } else {
+                            showToast('Erro ao salvar', 'error');
+                            td.textContent = valorAtual || '<span style="color:#666">-</span>';
+                        }
+                    } catch (err) {
+                        showToast('Erro de conexao', 'error');
+                        td.textContent = valorAtual || '<span style="color:#666">-</span>';
+                    }
+                }
+            };
+
+            input.addEventListener('blur', salvar);
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    input.blur();
+                } else if (ev.key === 'Escape') {
+                    td.textContent = valorAtual || '<span style="color:#666">-</span>';
+                }
+            });
+        }
+
+        function filterTable(termo) {
+            const t = termo.toLowerCase();
+            const filtrado = todosRegistros.filter(r =>
+                (r.cod_sipra || '').toLowerCase().includes(t) ||
+                (r.nome || '').toLowerCase().includes(t) ||
+                (r.processo_sei || '').toLowerCase().includes(t) ||
+                (r.processo_gerado || '').toLowerCase().includes(t) ||
+                (r.tipo_documento_nome || '').toLowerCase().includes(t) ||
+                (r.nome_arvore_processado || '').toLowerCase().includes(t)
+            );
+            renderizarTabela(filtrado);
+        }
+
+        // -------------------------------------------------------- KEEPALIVE
+        function atualizarStatusKeepalive(ka) {
+            if (!ka) return;
+            const kaEl = $('ka-status');
+            const btn = $('ka-btn');
+            const intervalo = $('ka-intervalo');
+            if (intervalo && ka.intervalo && document.activeElement !== intervalo) {
+                intervalo.value = Number(ka.intervalo) || 60;
+            }
+            if (kaEl) {
+                kaEl.textContent = (ka.ativo ? 'ativado' : 'desativado')
+                    + (ka.ultima_recarga ? ` | ultima recarga: ${ka.ultima_recarga} (${ka.recargas || 0}x)` : ' | ainda nao recarregou')
+                    + (ka.ultimo_erro ? ` | ${ka.ultimo_erro}` : '');
+                kaEl.style.color = ka.ativo ? '#1a6a3a' : '#8a1f1f';
+            }
+            if (btn) btn.textContent = ka.ativo ? 'Desativar keep-alive' : 'Ativar keep-alive';
+        }
+
+        async function atualizarKeepalive() {
+            try {
+                const res = await fetch('/api/keepalive');
+                atualizarStatusKeepalive(await res.json());
+            } catch (e) {
+                /* ignora erro de conexao no polling de status */
+            }
+        }
+
+        async function keepaliveToggle() {
+            try {
+                const res = await fetch('/api/keepalive');
+                const ka = await res.json();
+                const novo = !ka.ativo;
+                const intervalo = Math.max(30, Number($('ka-intervalo').value) || 60);
+                const res2 = await fetch('/api/keepalive', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ativo: novo, intervalo })
+                });
+                const d2 = await res2.json();
+                atualizarStatusKeepalive(d2.keepalive || { ativo: novo });
+                showToast('Keep-alive ' + ((d2.keepalive && d2.keepalive.ativo) ? 'ativado' : 'desativado'), 'success');
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function keepaliveIntervalo() {
+            const intervalo = Math.max(30, Number($('ka-intervalo').value) || 60);
+            $('ka-intervalo').value = intervalo;
+            try {
+                const res = await fetch('/api/keepalive', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ intervalo })
+                });
+                const d = await res.json();
+                atualizarStatusKeepalive(d.keepalive || { intervalo });
+                showToast('Intervalo do keep-alive: ' + intervalo + 's', 'success');
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        async function keepaliveAgora() {
+            showToast('Recarregando aba do SEI...', 'success');
+            try {
+                const res = await fetch('/api/keepalive', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agora: true })
+                });
+                const d = await res.json();
+                if (d.resultado && d.resultado.ok) {
+                    showToast('Aba do SEI recarregada: ' + (d.resultado.url || ''), 'success');
+                } else {
+                    showToast('Keep-alive: ' + ((d.resultado && d.resultado.motivo) || 'sem retorno'), 'error');
+                }
+            } catch (e) {
+                showToast('Erro de conexao', 'error');
+            }
+        }
+
+        // ------------------------------------------------------------- BOOT
+        function pollTudo() {
+            pollGeracao();
+            pollBaixar();
+            pollStatus();
+            if (document.querySelector('.aba[data-aba="log"].ativa')) carregarLog();
+        }
+
+        configurarAbas();
+        carregarRegistros();
+        carregarConfig();
+        carregarGerarConfig();
+        carregarGeracaoRegistros();
+        carregarBaixarRegistros();
+        atualizarKeepalive();
+        pollTudo();
+        setInterval(pollTudo, 2500);
+        setInterval(atualizarKeepalive, 10000);
+    </script>
+</body>
+</html>
