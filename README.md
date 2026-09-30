@@ -1,6 +1,6 @@
 # Gerador SEI
 
-Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e no **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
+Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e na **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
 
 ---
 
@@ -9,7 +9,7 @@ Sistema automatizado de **geração de processos**, **anexação de documentos**
 O Gerador SEI recebe uma planilha CSV com os dados dos beneficiários e:
 
 1. **Gera** o processo de cada beneficiário no SEI (aba **Gerar**);
-2. **Baixa** o Espelho da Unidade Familiar de cada um no PGT (aba **Baixar**);
+2. **Baixa** o Espelho da Unidade Familiar de cada um na PGT (aba **Baixar**);
 3. **Anexa** os PDFs de cada um ao respectivo processo SEI (aba **Anexar**).
 
 Tudo é controlado por um único painel em `http://localhost:5000`, com barra de progresso, passo atual, pausa/cancelamento e log unificado por aba.
@@ -21,7 +21,7 @@ Tudo é controlado por um único painel em `http://localhost:5000`, com barra de
 - **Upload de CSV**: importa a planilha (código SIPRA, nome, nº do processo) — **reimportar faz merge** (mantém PDF, status e registros fora do CSV)
 - **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo
 - **Geração de Processos**: CSV → processo novo no SEI, com captura do NUP gerado e exportação de relatório consolidado
-- **Downloads do PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `downloads/`
+- **Downloads da PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `downloads/`
 - **Anexação Automatizada**: navegação e preenchimento de formulários no SEI via Playwright
 - **Painel de Controle**: interface em **abas (Gerar | Baixar | Anexar | Log)** com barra de progresso por aba, **passo atual** e **caixa dos últimos erros** em tempo real
 - **Fila inteligente de anexação**: usa o processo do CSV ou, na falta, o **NUP gerado** na aba Gerar
@@ -55,11 +55,6 @@ gerador_sei/
 ├── processos_sei.db         # Banco SQLite (gerado em execução) [não versionado]
 └── processos_sei.log        # Log (gerado em execução)          [não versionado]
 ```
-
-> **Fora deste repositório** (mantidos apenas na máquina de desenvolvimento, já que
-> não sobem para o GitHub): as pastas `extensao_gerador_sei/` (extensão Chrome) e
-> `testes_extensao/` (testes automatizados), além de tudo o que o `.gitignore`
-> exclui (dados, banco, logs e estado de execução).
 
 ---
 
@@ -125,14 +120,14 @@ O painel fica disponível em **http://localhost:5000**.
    mais status/erros de geração, download e anexo, NUP gerado, arquivo baixado e
    datas (separador `;`, UTF-8 com BOM)
 
-### Aba Baixar — espelhos do PGT
+### Aba Baixar — espelhos da PGT
 
 1. Os códigos dos beneficiários vêm do CSV carregado na aba Gerar
 2. Faça login em https://pgt.incra.gov.br
 3. Clique em **Baixar**: a barra mostra `baixando X de Y`
 4. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
    **Executar novamente (erros)** recoloca na fila os downloads com falha
-5. Os arquivos vão para `downloads/` com o nome sugerido pelo PGT
+5. Os arquivos vão para `downloads/` com o nome sugerido pela PGT
 
 ### Aba Anexar — documentos no SEI
 
@@ -263,7 +258,6 @@ Sobe para o repositório apenas **código e interface**. Ficam de fora:
 
 | Excluído | Motivo |
 |----------|--------|
-| `extensao_gerador_sei/`, `testes_extensao/` | fora do escopo deste repositório |
 | `__pycache__/`, `*.pyc` | cache de bytecode |
 | `processos_sei.db` | banco de dados local |
 | `processos_sei.log`, `*.log` | logs de execução |
@@ -306,6 +300,14 @@ Sobe para o repositório apenas **código e interface**. Ficam de fora:
 
 ---
 
-## Autor
+## Suporte
+
+Desenvolvido por **Roberto Simões**
+
+| Canal | Contato |
+|-------|---------|
+| E-mail | robsimoes@gmail.com |
+| WhatsApp | +55 (48) 99679-3828 |
+| LinkedIn | linkedin.com/in/robertosim |
 
 Desenvolvido para uso interno do **INCRA** — Instituto Nacional de Colonização e Reforma Agrária.
