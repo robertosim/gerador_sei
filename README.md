@@ -1,6 +1,6 @@
 # Gerador SEI
 
-Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e na **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
+Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e no **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
 
 ---
 
@@ -9,7 +9,7 @@ Sistema automatizado de **geração de processos**, **anexação de documentos**
 O Gerador SEI recebe uma planilha CSV com os dados dos beneficiários e:
 
 1. **Gera** o processo de cada beneficiário no SEI (aba **Gerar**);
-2. **Baixa** o Espelho da Unidade Familiar de cada um na PGT (aba **Baixar**);
+2. **Baixa** o Espelho da Unidade Familiar de cada um no PGT (aba **Baixar**);
 3. **Anexa** os PDFs de cada um ao respectivo processo SEI (aba **Anexar**).
 
 Tudo é controlado por um único painel em `http://localhost:5000`, com barra de progresso, passo atual, pausa/cancelamento e log unificado por aba.
@@ -19,13 +19,13 @@ Tudo é controlado por um único painel em `http://localhost:5000`, com barra de
 ## Funcionalidades Principais
 
 - **Upload de CSV**: importa a planilha (código SIPRA, nome, nº do processo) — **reimportar faz merge** (mantém PDF, status e registros fora do CSV)
-- **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo
+- **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo (**padrão duas letras + dígitos**: `MS001200000001`); o upload reporta `associados / novos / ignorados`
 - **Geração de Processos**: CSV → processo novo no SEI, com captura do NUP gerado e exportação de relatório consolidado
-- **Downloads da PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `downloads/`
+- **Downloads do PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `Downloads/arquivos_pgt` (pasta criada automaticamente), **reutilizando a aba do PGT já aberta e logada**
 - **Anexação Automatizada**: navegação e preenchimento de formulários no SEI via Playwright
 - **Painel de Controle**: interface em **abas (Gerar | Baixar | Anexar | Log)** com barra de progresso por aba, **passo atual** e **caixa dos últimos erros** em tempo real
 - **Fila inteligente de anexação**: usa o processo do CSV ou, na falta, o **NUP gerado** na aba Gerar
-- **Configuração flexível**: tipo de documento, sigilo (`U=Urgente`, `S=Sigiloso`), hipótese legal e nível de acesso
+- **Configuração flexível**: tipo de documento, grau de sigilo (`R=Reservado`, `U=Urgente`, `S=Sigiloso`), hipótese legal e nível de acesso — **Salvar Configurações** grava em `config_anexo` e aplica em massa nos registros (campo em branco mantém o valor que o registro já tinha)
 - **Tratamento de erros**: pausa/cancelamento de cada execução (a pausa segura o robô **no passo atual**), retry dos registros que falharam e **sessão expirada aborta a execução**
 - **Keep-alive**: recarrega a aba do SEI em intervalo configurável para manter a sessão viva
 - **Limpeza por aba**: *Limpar registros* (anexar), *Limpar Tudo* (gerar) e *Limpar log*
@@ -51,10 +51,18 @@ gerador_sei/
 │   └── sei-style.css       # Estilo do painel (abas, progresso, tabelas)
 ├── uploads/                # PDFs enviados pelo usuário        [não versionado]
 ├── csv/                    # Planilhas CSV de entrada          [não versionado]
-├── downloads/              # Espelhos baixados no PGT          [não versionado]
 ├── processos_sei.db         # Banco SQLite (gerado em execução) [não versionado]
 └── processos_sei.log        # Log (gerado em execução)          [não versionado]
 ```
+
+> Os espelhos do PGT vão para `Downloads/arquivos_pgt` (pasta do Windows,
+> criada no início de cada execução) — fora do projeto de propósito.
+
+> **Fora deste repositório** (mantidos apenas na máquina de desenvolvimento, já que
+> não sobem para o GitHub): a pasta irmã `../Extensão Gerador SEI/`, que guarda a
+> extensão Chrome (`extensao_gerador_sei/`) e os testes automatizados
+> (`testes_extensao/`), além de tudo o que o `.gitignore` exclui (dados, banco,
+> logs e estado de execução).
 
 ---
 
@@ -120,14 +128,19 @@ O painel fica disponível em **http://localhost:5000**.
    mais status/erros de geração, download e anexo, NUP gerado, arquivo baixado e
    datas (separador `;`, UTF-8 com BOM)
 
-### Aba Baixar — espelhos da PGT
+### Aba Baixar — espelhos do PGT
 
 1. Os códigos dos beneficiários vêm do CSV carregado na aba Gerar
-2. Faça login em https://pgt.incra.gov.br
+2. Faça login em https://pgt.incra.gov.br **na aba do PGT aberta no Chrome debug**
 3. Clique em **Baixar**: a barra mostra `baixando X de Y`
-4. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
+4. O robô **reutiliza essa mesma aba do PGT** (não abre outra); se a sessão
+   expirou, ele **aborta antes de clicar** em *Baixar relatório* — refaça o login
+   e clique em Baixar de novo
+5. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
    **Executar novamente (erros)** recoloca na fila os downloads com falha
-5. Os arquivos vão para `downloads/` com o nome sugerido pela PGT
+6. Os arquivos vão para `Downloads/arquivos_pgt` com o nome original sugerido pelo
+   PGT (ex.: `unidade-familiar-MS001200000001.pdf`); arquivo repetido ganha o
+   sufixo `_<código>`
 
 ### Aba Anexar — documentos no SEI
 
@@ -136,16 +149,24 @@ O painel fica disponível em **http://localhost:5000**.
    | Campo | Descrição | Valor padrão |
    |-------|-----------|--------------|
    | Tipo do Documento | Série do SEI (Anexo, Relatório, etc.) | Anexo (263) |
-   | Grau de Sigilo | Ultrassecreto, Secreto, Reservado ou Não Classificado | Não Classificado |
-   | Nome na Árvore | Nome exibido na árvore de documentos | Espelho SIPRA |
-   | Hipótese Legal | Fundamentação legal do acesso | Informação Pessoal |
+   | Nome na Árvore | Nome exibido na árvore; aceita coringas `{{Código SIPRA}}`, `{{Nome Titular 1}}`… | Espelho SIPRA |
+   | Grau de Sigilo | Reservado, Urgente ou Sigiloso | Reservado |
+   | Hipótese Legal | Fundamentação legal do acesso | Informação Pessoal (Art. 31 da Lei nº 12.527/2011) |
    | Nível de Acesso | Público, Restrito ou Sigiloso | Restrito |
+
+   **Salvar Configurações** grava os parâmetros em `config_anexo` e atualiza em
+   massa os campos `tipo_documento`, `nome_arvore`, `nivel_acesso` e
+   `hipotese_legal` de todos os registros; um campo deixado em branco **não
+   apaga** o valor que o registro já tinha.
 
 2. **1. Carregar CSV** — colunas `CÓDIGO DO BENEFICIÁRIO`, `PROC SEI`,
    `BENEFICIÁRIO` (delimitador `;`, encoding UTF-8 ou CP1252)
 3. **2. Carregar Anexos PDF** — selecione a **pasta** com os PDFs; a associação é
-   pelo código SIPRA no nome do arquivo
-   (`SC0XXXXXXXXX - NOME DO BENEFICIÁRIO.pdf`)
+   feita por **expressão regular** comparando o código do CSV com o nome do
+   arquivo. O código segue o padrão **duas letras + dígitos** (`MS001200000001`),
+   então `unidade-familiar-MS001200000001.pdf`, `MS001200000001 - NOME.pdf` e
+   `MS 001200000001.pdf` caem todos no mesmo registro. O nome do PDF associado
+   aparece na aba **Anexar**, coluna **PDF Anexo**
 4. Faça login no SEI e clique em **Anexar no SEI**, acompanhando o progresso
 5. **Limpar registros** zera a tabela sem apagar os PDFs já enviados
 
@@ -182,13 +203,25 @@ Tabela `anexos_sei` (SQLite):
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
 | id | INTEGER | Chave primária (autoincremento) |
-| cod_sipra | TEXT | Código SIPRA do beneficiário |
+| cod_sipra | TEXT | Código SIPRA do beneficiário (padrão 2 letras + dígitos) |
 | nome | TEXT | Nome do beneficiário |
 | processo_sei | TEXT | Número do processo SEI |
-| pdf_anexo | TEXT | Nome do arquivo PDF associado |
+| pdf_anexo | TEXT | Nome do arquivo PDF associado (vem da aba Anexar) |
 | anexado | INTEGER | Status: 0=pendente, 1=anexado, -1=erro |
+| tipo_documento | INTEGER | Série do SEI gravada pela configuração |
+| nome_arvore | TEXT | Nome na árvore (template com coringas já processado) |
+| nivel_acesso | INTEGER | 0=Público, 1=Restrito, 2=Sigiloso |
+| hipotese_legal | INTEGER | Código da hipótese legal |
+| data_anexo | TEXT | Data/hora da anexação |
 
-Há também `processos_gerados` (fila de geração) e `config_geracao` (configurações da aba Gerar).
+Há também:
+
+- `config_anexo` — configuração da aba Anexar (`serie`, `sigilo`, `nome_arvore`,
+  `hipotese`, `nivel`), regravada a cada *Salvar Configurações*
+- `processos_gerados` — fila de geração da aba Gerar, com o estado dos downloads
+  (`download`, `erro_download`, `arquivo_download`, `data_download`)
+- `config_geracao` — configurações da aba Gerar
+- `tipo_documento` e `hipotese_legal` — tabelas de apoio das séries e hipóteses
 
 ---
 
@@ -258,10 +291,12 @@ Sobe para o repositório apenas **código e interface**. Ficam de fora:
 
 | Excluído | Motivo |
 |----------|--------|
+| `extensao_gerador_sei/`, `testes_extensao/` | fora do escopo deste repositório (ficam em `../Extensão Gerador SEI/`) |
 | `__pycache__/`, `*.pyc` | cache de bytecode |
 | `processos_sei.db` | banco de dados local |
 | `processos_sei.log`, `*.log` | logs de execução |
-| `uploads/`, `csv/`, `downloads/`, `Anexos/` | dados do usuário |
+| `uploads/`, `csv/`, `Anexos/` | dados do usuário |
+| `downloads/` | pasta legada de downloads (hoje usa `Downloads/arquivos_pgt`) |
 | `keepalive.json` | estado de execução do keep-alive |
 | `venv/`, `.env` | ambiente virtual e segredos |
 
@@ -283,7 +318,10 @@ Sobe para o repositório apenas **código e interface**. Ficam de fora:
 | Chrome não conecta | Verifique se o Chrome está em modo debug (porta 9222) |
 | Interface desatualizada | Use `iniciar.bat` (mata o servidor antigo da porta 5000) |
 | CSV não carrega | Verifique o encoding (UTF-8 ou CP1252) e o delimitador (`;`) |
-| PDF não associa | O nome do arquivo deve conter `SC0XXXXXXXXX` |
+| PDF não associa | O nome do arquivo precisa conter o código do CSV no padrão **2 letras + dígitos** (`MS001200000001`), com ou sem separadores |
+| Configuração não salva | Abra as Configurações do Anexo pela própria aba Anexar e clique em **Salvar Configurações**; veja o log em `processos_sei.log` |
+| Download não começa | Sessão expirada no PGT aborta de propósito; refaça o login na aba do PGT |
+| Onde ficam os espelhos | `C:\Users\<usuário>\Downloads\arquivos_pgt` (criada automaticamente ao iniciar o download) |
 | Anexação falha no SEI | Verifique se está logado no SEI no Chrome debugado |
 | Formulário não encontrado | O SEI pode ter alterado a estrutura de frames |
 | Sessão expirada | A execução aborta de propósito; refaça o login e reinicie |
@@ -300,14 +338,6 @@ Sobe para o repositório apenas **código e interface**. Ficam de fora:
 
 ---
 
-## Suporte
-
-Desenvolvido por **Roberto Simões**
-
-| Canal | Contato |
-|-------|---------|
-| E-mail | robsimoes@gmail.com |
-| WhatsApp | +55 (48) 99679-3828 |
-| LinkedIn | linkedin.com/in/robertosim |
+## Autor
 
 Desenvolvido para uso interno do **INCRA** — Instituto Nacional de Colonização e Reforma Agrária.

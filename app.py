@@ -389,6 +389,78 @@ def upload_csv():
         return jsonify({'error': str(e)}), 500
 
 
+# Padrao do codigo SIPRA: duas letras seguidas de digitos (ex.: MS001200000001).
+# As bordas impedem pegar pedacos de palavras ("relatorio2024" nao vira "io2024").
+PADRAO_CODIGO = re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{2}\d{4,})(?![A-Za-z0-9])')
+
+_REGEX_CODIGO = {}
+
+
+def _so_alnum(txt):
+    """Mantem so letras/digitos e maiusculas: compara codigo com nome de arquivo."""
+    return re.sub(r'[^A-Za-z0-9]', '', txt or '').upper()
+
+
+def _regex_do_codigo(cod_norm):
+    """Regex do codigo com fronteiras: casa "MS 001200000001" e "unidade-familiar-
+    MS001200000001", mas nao "MS001200000001" dentro de "MS0012000000012"."""
+    r = _REGEX_CODIGO.get(cod_norm)
+    if r is None:
+        partes = re.match(r'^([A-Za-z]+)(\d+)$', cod_norm)
+        if partes:
+            r = re.compile(
+                r'(?<![A-Za-z0-9])' + re.escape(partes.group(1))
+                + r'[\s._\-]*' + re.escape(partes.group(2)) + r'(?!\d)',
+                re.IGNORECASE)
+        else:
+            r = re.compile(re.escape(cod_norm), re.IGNORECASE)
+        _REGEX_CODIGO[cod_norm] = r
+    return r
+
+
+def extrair_codigo(nome_arquivo, codigos):
+    """Codigo do registro que aparece no nome do PDF.
+
+    codigos: dict {codigo_normalizado: codigo_original} vindo do banco (CSV).
+
+    1) o codigo do banco casado com fronteiras no nome do arquivo;
+    2) o codigo como texto puro no nome, sem depender de separadores
+       (cobre "MS001200000001MARIA.pdf" e prefixos de pasta);
+    3) se o codigo nao esta no banco, o token que case com o padrao
+       <2 letras><digitos> e devolvido (gera registro novo).
+    """
+    base = os.path.basename(str(nome_arquivo or '').replace('\\', '/'))
+    if base.lower().endswith('.pdf'):
+        base = base[:-4]
+    nome_norm = _so_alnum(base)
+
+    melhor, melhor_len = '', 0
+
+    for cod_norm, cod in codigos.items():
+        if cod_norm and len(cod_norm) > melhor_len and _regex_do_codigo(cod_norm).search(base):
+            melhor, melhor_len = cod, len(cod_norm)
+
+    if not melhor:
+        for cod_norm, cod in codigos.items():
+            if not cod_norm or len(cod_norm) <= melhor_len:
+                continue
+            pos = nome_norm.find(cod_norm)
+            while pos >= 0:
+                fim = pos + len(cod_norm)
+                # "MS0012000000012" nao pode casar com "MS001200000001"
+                if fim >= len(nome_norm) or not nome_norm[fim].isdigit():
+                    melhor, melhor_len = cod, len(cod_norm)
+                    break
+                pos = nome_norm.find(cod_norm, pos + 1)
+
+    if melhor:
+        return melhor
+
+    for token in PADRAO_CODIGO.findall(base):
+        return codigos.get(token.upper(), token.upper())
+    return ''
+
+
 @app.route('/api/upload-pdfs', methods=['POST'])
 def upload_pdfs():
     log.info('--- INICIO upload-pdfs ---')
@@ -407,11 +479,21 @@ def upload_pdfs():
     pdf_dir = app.config['UPLOAD_FOLDER']
     os.makedirs(pdf_dir, exist_ok=True)
 
-    pattern = re.compile(r'SC0\d+', re.IGNORECASE)
     db = get_db()
+
+    # Codigos vindo do CSV (aba Gerar): {normalizado: original}. A associacao
+    # compara o codigo com o NOME DO ARQUIVO, entao "MS001200000001 - MARIA.pdf"
+    # ou "unidade-familiar-MS001200000001.pdf" caem no mesmo registro.
+    codigos_db = {}
+    for r in db.execute('SELECT cod_sipra FROM anexos_sei').fetchall():
+        cod = str(r['cod_sipra'] or '').strip()
+        if cod:
+            codigos_db[_so_alnum(cod)] = cod
+    log.info('Codigos no banco para associacao: %d', len(codigos_db))
 
     associados = 0
     ignorados = 0
+    novos = 0
     resultados = []
 
     for i, f in enumerate(files, start=1):
@@ -424,14 +506,13 @@ def upload_pdfs():
             log.debug('Ignorado (nao e PDF): %s', nome_arquivo)
             continue
 
-        match = pattern.search(nome_arquivo)
-        if not match:
+        cod_sipra = extrair_codigo(nome_arquivo, codigos_db)
+        if not cod_sipra:
             ignorados += 1
             resultados.append({'arquivo': nome_arquivo, 'status': 'sem_codigo', 'codigo': None})
-            log.warning('Ignorado (sem codigo SC0): %s', nome_arquivo)
+            log.warning('Ignorado (sem codigo <2 letras><digitos>): %s', nome_arquivo)
             continue
 
-        cod_sipra = match.group(0).upper()
         log.debug('Codigo SIPRA extraido: %s de %s', cod_sipra, nome_arquivo)
 
         try:
@@ -444,13 +525,13 @@ def upload_pdfs():
             continue
 
         row = db.execute(
-            'SELECT id FROM anexos_sei WHERE cod_sipra = ?', (cod_sipra,)
+            'SELECT id FROM anexos_sei WHERE UPPER(cod_sipra) = UPPER(?)', (cod_sipra,)
         ).fetchone()
 
         if row:
             db.execute(
-                'UPDATE anexos_sei SET pdf_anexo = ?, anexado = 0 WHERE cod_sipra = ?',
-                (nome_arquivo, cod_sipra)
+                'UPDATE anexos_sei SET pdf_anexo = ?, anexado = 0 WHERE id = ?',
+                (nome_arquivo, row['id'])
             )
             associados += 1
             resultados.append({'arquivo': nome_arquivo, 'status': 'ok', 'codigo': cod_sipra})
@@ -460,17 +541,21 @@ def upload_pdfs():
                 'INSERT INTO anexos_sei (cod_sipra, nome, processo_sei, pdf_anexo, anexado) VALUES (?, ?, ?, ?, 0)',
                 (cod_sipra, '', '', nome_arquivo)
             )
-            associados += 1
+            codigos_db[_so_alnum(cod_sipra)] = cod_sipra
+            novos += 1
             resultados.append({'arquivo': nome_arquivo, 'status': 'novo', 'codigo': cod_sipra})
             log.debug('Novo registro criado: %s -> %s', nome_arquivo, cod_sipra)
 
     db.commit()
     db.close()
 
-    log.info('--- FIM upload-pdfs | associados=%d | ignorados=%d ---', associados, ignorados)
+    associados += novos
+    log.info('--- FIM upload-pdfs | associados=%d (novos=%d) | ignorados=%d ---',
+             associados, novos, ignorados)
     return jsonify({
         'success': True,
         'associados': associados,
+        'novos': novos,
         'ignorados': ignorados,
         'resultados': resultados
     })
@@ -671,39 +756,60 @@ def save_config():
     try:
         cfg = request.get_json(force=True)
         log.info('Salvando config: %s', cfg)
+
+        # "null"/"None" vem dos placeholders antigos dos <option>: nunca devem
+        # parar no banco (viravam a string literal "null" no tipo_documento).
+        def limpar(valor, padrao=''):
+            if valor is None:
+                return padrao
+            texto = str(valor).strip()
+            if texto.lower() in ('null', 'none'):
+                return padrao
+            return texto
+
+        serie = limpar(cfg.get('serie'))
+        sigilo = limpar(cfg.get('sigilo'), 'R')
+        nome_arvore = limpar(cfg.get('nome_arvore'))
+        hipotese = limpar(cfg.get('hipotese'))
+        nivel = limpar(cfg.get('nivel'), '1')
+
         db = get_db()
         db.execute('DELETE FROM config_anexo')
         db.execute('''INSERT INTO config_anexo (serie, sigilo, nome_arvore, hipotese, nivel)
                       VALUES (?, ?, ?, ?, ?)''',
-                   (cfg.get('serie'), cfg.get('sigilo'), cfg.get('nome_arvore'),
-                    cfg.get('hipotese'), cfg.get('nivel')))
-        
-        nome_arvore_template = cfg.get('nome_arvore', '')
-        tipo_doc = cfg.get('serie')
-        nivel = cfg.get('nivel', '1')
-        hipotese = cfg.get('hipotese')
-        
-        tipo_row = db.execute('SELECT nome FROM tipo_documento WHERE codigo = ?', (tipo_doc,)).fetchone() if tipo_doc else None
-        tipo_nome = tipo_row['nome'] if tipo_row else ''
-        hip_row = db.execute('SELECT nome FROM hipotese_legal WHERE codigo = ?', (hipotese,)).fetchone() if hipotese else None
-        hip_nome = hip_row['nome'] if hip_row else ''
+                   (serie, sigilo, nome_arvore, hipotese, nivel))
 
-        rows = db.execute('SELECT id, cod_sipra, nome, processo_sei, pdf_anexo, data_anexo FROM anexos_sei').fetchall()
+        # Campo em branco na configuracao NAO apaga o que o registro ja tinha:
+        # em massa so entra o que foi preenchido aqui.
+        nomes_tipo = {str(r['codigo']): r['nome']
+                      for r in db.execute('SELECT codigo, nome FROM tipo_documento')}
+        nomes_hip = {str(r['codigo']): r['nome']
+                     for r in db.execute('SELECT codigo, nome FROM hipotese_legal')}
+
+        rows = db.execute('SELECT * FROM anexos_sei').fetchall()
         for row in rows:
-            reg = dict(row)
-            reg['tipo_documento'] = tipo_doc
-            reg['tipo_documento_nome'] = tipo_nome
-            reg['nivel_acesso'] = nivel
-            reg['hipotese_legal'] = hipotese
-            reg['hipotese_legal_nome'] = hip_nome
-            nome_arvore_processado = processar_nome_arvore_template(nome_arvore_template, reg)
+            atual = dict(row)
+            tipo_final = serie or str(atual.get('tipo_documento') or '')
+            hip_final = hipotese or str(atual.get('hipotese_legal') or '')
+            nivel_final = nivel or str(atual.get('nivel_acesso') or '1')
+            template = nome_arvore or str(atual.get('nome_arvore') or '')
+
+            reg = dict(atual)
+            reg['tipo_documento'] = tipo_final
+            reg['tipo_documento_nome'] = nomes_tipo.get(tipo_final, '')
+            reg['nivel_acesso'] = nivel_final
+            reg['hipotese_legal'] = hip_final
+            reg['hipotese_legal_nome'] = nomes_hip.get(hip_final, '')
+            nome_arvore_processado = processar_nome_arvore_template(template, reg)
             db.execute('''UPDATE anexos_sei
                          SET tipo_documento = ?, nome_arvore = ?, nivel_acesso = ?, hipotese_legal = ?
                          WHERE id = ?''',
-                      (tipo_doc, nome_arvore_processado, nivel, hipotese, row['id']))
-        
+                      (tipo_final, nome_arvore_processado, nivel_final, hip_final, row['id']))
+
         db.commit()
         db.close()
+        log.info('Config salva | serie=%s | sigilo=%s | nome_arvore=%s | hipotese=%s | nivel=%s | registros=%d',
+                 serie, sigilo, nome_arvore, hipotese, nivel, len(rows))
         return jsonify({'success': True, 'registros_atualizados': len(rows)})
     except Exception as e:
         log.error('ERRO ao salvar config: %s\n%s', e, traceback.format_exc())

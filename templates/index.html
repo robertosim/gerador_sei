@@ -36,17 +36,13 @@
                                 <option value="">&nbsp;</option>
                             </select>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group full">
                             <label>Especificacao (coringas: {{ '{{Nome Titular 1}}' }})</label>
                             <input type="text" id="gerar-especificacao" placeholder="Ex: CCIR {{ '{{Nome Titular 1}}' }}">
                         </div>
-                        <div class="form-group">
-                            <label>Interessados</label>
-                            <input type="text" id="gerar-interessados" placeholder="Ex: {{ '{{Nome Titular 1}}' }}">
-                        </div>
                         <div class="form-group full">
                             <label>Observacoes desta unidade</label>
-                            <input type="text" id="gerar-observacoes">
+                            <input type="text" id="gerar-observacoes" placeholder="Ex: CCIR {{ '{{Nome Titular 1}}' }}">
                         </div>
                         <div class="form-group full">
                             <label>Nivel de Acesso</label>
@@ -66,9 +62,28 @@
                     <div style="margin-top: 16px; text-align: right;">
                         <button class="btn" onclick="salvarGerarConfig()">Salvar Configuracao</button>
                     </div>
+                    <div class="panels" style="margin-top: 16px;">
+                        <div class="panel">
+                            <h2>1. Carregar CSV</h2>
+                            <div class="upload-area" id="csv-upload-area">
+                                <input type="file" id="csv-file" accept=".csv" onchange="uploadCSV(this)">
+                                <div class="icon">&#128196;</div>
+                                <div class="text">Arraste ou clique para selecionar o <b>CSV</b></div>
+                                <div class="file-name" id="csv-filename"></div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <h2>2. Carregar Anexos PDF</h2>
+                            <div class="upload-area" id="pdf-upload-area">
+                                <input type="file" id="pdf-files" accept=".pdf" multiple webkitdirectory onchange="uploadPDFs(this)">
+                                <div class="icon">&#128194;</div>
+                                <div class="text">Selecione a <b>pasta com os PDFs</b></div>
+                                <div class="file-name" id="pdf-filename"></div>
+                            </div>
+                        </div>
+                    </div>
 
                     <div class="sei-actions" style="margin-top: 16px;">
-                        <button class="btn btn-secondary" onclick="carregarCsvGeracao()">1. Carregar CSV da pasta csv/</button>
                         <button class="btn" style="background:#5c0a0a;" onclick="limparFilaGeracao()">Limpar Tudo</button>
                         <button class="btn" id="btn-gerar" onclick="alternarGeracao()">2. Iniciar Geracao</button>
                         <button class="btn btn-danger oculto" id="btn-cancelar-gerar" onclick="cancelarGeracao()">Cancelar</button>
@@ -152,7 +167,7 @@
                     </div>
 
                     <div class="exec-texto">Os codigos vem do CSV da aba <b>Gerar</b>; os espelhos sao salvos
-                        na pasta <b>downloads/</b>.</div>
+                        na pasta <b>Downloads\arquivos_pgt</b> (criada automaticamente).</div>
 
                     <div class="table-container" style="margin-top: 16px;">
                         <div class="table-header">
@@ -200,26 +215,7 @@
                 </div>
             </div>
 
-            <div class="panels">
-                <div class="panel">
-                    <h2>1. Carregar CSV</h2>
-                    <div class="upload-area" id="csv-upload-area">
-                        <input type="file" id="csv-file" accept=".csv" onchange="uploadCSV(this)">
-                        <div class="icon">&#128196;</div>
-                        <div class="text">Arraste ou clique para selecionar o <b>CSV</b></div>
-                        <div class="file-name" id="csv-filename"></div>
-                    </div>
-                </div>
-                <div class="panel">
-                    <h2>2. Carregar Anexos PDF</h2>
-                    <div class="upload-area" id="pdf-upload-area">
-                        <input type="file" id="pdf-files" accept=".pdf" multiple webkitdirectory onchange="uploadPDFs(this)">
-                        <div class="icon">&#128194;</div>
-                        <div class="text">Selecione a <b>pasta com os PDFs</b></div>
-                        <div class="file-name" id="pdf-filename"></div>
-                    </div>
-                </div>
-            </div>
+            
 
             <div class="config-section">
                 <div class="config-header" onclick="toggleConfig()">
@@ -230,27 +226,26 @@
                     <div class="form-grid">
                         <div class="form-group">
                             <label>Tipo do Documento</label>
-                            <select id="cfg-serie">
-                                <option value="null">&nbsp;</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Grau de Sigilo</label>
-                            <select id="cfg-sigilo">
-                                <option value="null">&nbsp;</option>
-                                <option value="R">Reservado</option>
-                                <option value="U">Urgente</option>
-                                <option value="S">Sigiloso</option>
-                            </select>
+                                <select id="cfg-serie">
+                                    <option value="">&nbsp;</option>
+                                </select>
                         </div>
                         <div class="form-group">
                             <label>Nome na Arvore</label>
                             <input type="text" id="cfg-nome-arvore" placeholder="Ex: CCIR">
                         </div>
                         <div class="form-group">
+                            <label>Grau de Sigilo</label>
+                            <select id="cfg-sigilo">
+                                <option value="R">Reservado</option>
+                                <option value="U">Urgente</option>
+                                <option value="S">Sigiloso</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label>Hipotese Legal</label>
                             <select id="cfg-hipotese">
-                                <option value="null">&nbsp;</option>
+                                <option value="">&nbsp;</option>
                             </select>
                         </div>
 
@@ -525,7 +520,6 @@
                 const cfg = await res.json();
                 $('gerar-tipo').value = cfg.tipo_processo || '';
                 $('gerar-especificacao').value = cfg.especificacao || '';
-                $('gerar-interessados').value = cfg.interessados || '';
                 $('gerar-observacoes').value = cfg.observacoes || '';
                 $('gerar-hipotese').value = cfg.hipotese_legal ?? '4';
                 const nivel = cfg.nivel_acesso || '1';
@@ -541,7 +535,6 @@
             const cfg = {
                 tipo_processo: $('gerar-tipo').value,
                 especificacao: $('gerar-especificacao').value,
-                interessados: $('gerar-interessados').value,
                 observacoes: $('gerar-observacoes').value,
                 nivel_acesso: document.querySelector('input[name="gerar-nivel"]:checked')?.value || '1',
                 hipotese_legal: $('gerar-hipotese').value
@@ -1059,7 +1052,7 @@
                 const res = await fetch('/api/tipos-documento');
                 const tipos = await res.json();
                 const sel = $('cfg-serie');
-                sel.innerHTML = '<option value="null">&nbsp;</option>';
+                sel.innerHTML = '<option value="">&nbsp;</option>';
                 tipos.forEach(t => {
                     const opt = document.createElement('option');
                     opt.value = t.codigo;
@@ -1080,7 +1073,7 @@
                 ['cfg-hipotese', 'gerar-hipotese'].forEach(id => {
                     const sel = $(id);
                     if (!sel) return;
-                    const vazio = id === 'cfg-hipotese' ? 'null' : '';
+                    const vazio = '';
                     sel.innerHTML = `<option value="${vazio}">&nbsp;</option>`;
                     hips.forEach(h => {
                         const opt = document.createElement('option');
@@ -1101,10 +1094,11 @@
             try {
                 const res = await fetch('/api/config');
                 const cfg = await res.json();
-                $('cfg-serie').value = cfg.serie || '82';
-                $('cfg-sigilo').value = cfg.sigilo || 'R';
-                $('cfg-nome-arvore').value = cfg.nome_arvore || 'CCIR';
-                $('cfg-hipotese').value = cfg.hipotese || '4';
+                const set = (id, v) => { const el = $(id); if (el) el.value = v; };
+                set('cfg-serie', cfg.serie || '82');
+                set('cfg-sigilo', cfg.sigilo || 'R');
+                set('cfg-nome-arvore', cfg.nome_arvore || 'CCIR');
+                set('cfg-hipotese', cfg.hipotese || '4');
                 const nivel = cfg.nivel || '1';
                 document.querySelectorAll('input[name="cfg-nivel"]').forEach(r => {
                     r.checked = r.value === nivel;
@@ -1114,14 +1108,28 @@
             }
         }
 
+        // Le um campo sem explodir se o elemento nao existir: um input faltando
+        // derrubava o monte de cfg fora do try e o POST nunca saia.
+        function valorDe(id, padrao) {
+            const el = $(id);
+            return el ? el.value : (padrao || '');
+        }
+
         async function salvarConfig() {
-            const cfg = {
-                serie: $('cfg-serie').value,
-                sigilo: $('cfg-sigilo').value,
-                nome_arvore: $('cfg-nome-arvore').value,
-                hipotese: $('cfg-hipotese').value,
-                nivel: document.querySelector('input[name="cfg-nivel"]:checked')?.value || '1'
-            };
+            let cfg;
+            try {
+                cfg = {
+                    serie: valorDe('cfg-serie'),
+                    sigilo: valorDe('cfg-sigilo', 'R'),
+                    nome_arvore: valorDe('cfg-nome-arvore'),
+                    hipotese: valorDe('cfg-hipotese'),
+                    nivel: document.querySelector('input[name="cfg-nivel"]:checked')?.value || '1'
+                };
+            } catch (e) {
+                console.error('Erro ao montar configuracao:', e);
+                showToast('Erro ao montar configuracao: ' + e.message, 'error');
+                return;
+            }
             try {
                 const res = await fetch('/api/config', {
                     method: 'POST',

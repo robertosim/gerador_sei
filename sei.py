@@ -9,8 +9,11 @@ from database import get_db, log_msg, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOADS_DIR = os.path.join(BASE_DIR, 'uploads')
-# Espelhos baixados na aba Baixar (mesma pasta usada pela extensao).
-ESPELHOS_DIR = os.path.join(BASE_DIR, 'downloads')
+# Espelhos do PGT: "arquivos_pgt" dentro da pasta Downloads do Windows
+# (criada na hora em que o download e iniciado).
+DOWNLOADS_USER = os.path.join(
+    os.environ.get('USERPROFILE') or os.path.expanduser('~'), 'Downloads')
+ESPELHOS_DIR = os.path.join(DOWNLOADS_USER, 'arquivos_pgt')
 PGT_URL = 'https://pgt.incra.gov.br/sipra/beneficiario'
 PGT_TIMEOUT = 60000
 PGT_TIMEOUT_DOWNLOAD = 180000
@@ -1549,6 +1552,23 @@ def _achar_aba_sei(browser):
     return None, None
 
 
+def _achar_aba_pgt(browser):
+    """Procura a aba do PGT ja aberta (com login ja feito) em todos os contexts.
+
+    Retorna (pagina, indice) ou (None, None). Nunca cria aba.
+    """
+    for ctx in browser.contexts:
+        for idx, pg in enumerate(ctx.pages):
+            try:
+                if pg.is_closed():
+                    continue
+                if 'pgt.incra.gov.br' in (pg.url or ''):
+                    return pg, idx
+            except Exception:
+                continue
+    return None, None
+
+
 def keepalive_uma_vez():
     """Recarrega a ABA do SEI ja aberta no Chrome debug (mantem sessao ativa).
 
@@ -1852,14 +1872,35 @@ def baixar_espelho(page, cod, nome=''):
         botao.click()
     download = info.value
 
-    sugerido = download.suggested_filename or f'espelho_{cod}.xls'
-    alvo = os.path.join(ESPELHOS_DIR, os.path.basename(sugerido))
+    # Espera os bytes chegarem; download interrompido nao vira arquivo.
+    falha = download.failure()
+    if falha:
+        return (False, f'Download interrompido no PGT: {falha}')
+
+    # Nome original sugerido pelo PGT, sempre dentro de Downloads/arquivos_pgt.
+    nome_original = os.path.basename(download.suggested_filename or f'espelho_{cod}.pdf')
+    alvo = os.path.join(ESPELHOS_DIR, nome_original)
     if os.path.exists(alvo):
-        base, ext = os.path.splitext(sugerido)
+        base, ext = os.path.splitext(nome_original)
         alvo = os.path.join(ESPELHOS_DIR, f'{base}_{cod}{ext}')
-    download.save_as(alvo)
+
+    try:
+        download.save_as(alvo)
+    except Exception as e:
+        # Os bytes ja estao no cache do Chrome: grava manualmente.
+        cache = None
+        try:
+            cache = download.path()
+        except Exception:
+            cache = None
+        if not cache or not os.path.exists(cache):
+            return (False, f'Falha ao salvar o download: {e}')
+        with open(cache, 'rb') as origem, open(alvo, 'wb') as destino:
+            destino.write(origem.read())
+        log_msg(f'BAIXAR [{cod}]: save_as falhou ({e}); bytes copiados de {cache}')
+
     arquivo = os.path.basename(alvo)
-    _blog(cod, 6, f'Arquivo salvo: {arquivo}')
+    _blog(cod, 6, f'Arquivo salvo em {ESPELHOS_DIR}: {arquivo}')
     return (True, arquivo)
 
 
@@ -1888,6 +1929,15 @@ def run_baixar():
     _blog('-', 0, 'Inicio dos downloads do PGT')
 
     try:
+        # Garante a pasta de destino antes de qualquer clique no PGT.
+        try:
+            os.makedirs(ESPELHOS_DIR, exist_ok=True)
+            _blog('-', 0, f'Pasta de destino: {ESPELHOS_DIR}')
+        except Exception as e:
+            _blog('-', 0, f'ERRO ao criar a pasta {ESPELHOS_DIR}: {e}')
+            status_final = 'erro'
+            return
+
         db = get_db()
         rows = db.execute(
             "SELECT * FROM processos_gerados "
@@ -1904,10 +1954,44 @@ def run_baixar():
 
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
-            context = browser.contexts[0]
-            page = context.new_page()
+
+            # A aba do PGT ja esta aberta e logada: reutiliza ela. Abrir uma
+            # aba nova obrigaria a refazer o login e jogaria a busca do zero.
+            page, idx = _achar_aba_pgt(browser)
+            aba_propria = page is None
+            if aba_propria:
+                _blog('-', 0, 'Nenhuma aba do PGT aberta: abrindo uma nova')
+                context = browser.contexts[0]
+                page = context.new_page()
+            else:
+                _blog('-', 0, f'Reutilizando a aba #{idx} do PGT ja aberta (logada)')
+                context = page.context
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
             page.on('dialog', _aceitar_dialog)
             context.on('page', lambda pg: pg.on('dialog', _aceitar_dialog))
+
+            # Comeca pela pagina de busca por codigo do beneficiario.
+            try:
+                if '/sipra/beneficiario' not in (page.url or ''):
+                    _blog('-', 0, f'Abrindo a busca de beneficiarios: {PGT_URL}')
+                    page.goto(PGT_URL, wait_until='domcontentloaded', timeout=PGT_TIMEOUT)
+                else:
+                    _blog('-', 0, 'Aba do PGT ja esta na pagina de busca de beneficiarios')
+                time.sleep(2)
+            except Exception as e:
+                _blog('-', 0, f'AVISO ao abrir a busca do PGT: {e}')
+
+            if _pgt_sessao_expirada(page):
+                # Nao adianta seguir: todos os registros dariam falha e ainda
+                # seriam marcados como erro na fila.
+                _blog('-', 0, 'Sessao expirada no PGT: faca login na aba do PGT '
+                              'e clique em Baixar de novo')
+                browser.close()
+                status_final = 'erro'
+                return
 
             for row in rows:
                 if _interromper(baixar_state):
@@ -1973,7 +2057,12 @@ def run_baixar():
 
                 baixar_state["processados"] += 1
 
-            page.close()
+            # So fecha a aba se ela foi criada por nos: a do usuario fica
+            # aberta (e logada) para a proxima execucao.
+            if aba_propria:
+                page.close()
+            else:
+                _blog('-', 0, 'Aba do PGT mantida aberta (reutilizada)')
             browser.close()
 
     except InterrupcaoExecucao:
