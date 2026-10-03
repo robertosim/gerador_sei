@@ -285,23 +285,6 @@ Há também:
 
 ---
 
-## Versionamento (`.gitignore`)
-
-Sobe para o repositório apenas **código e interface**. Ficam de fora:
-
-| Excluído | Motivo |
-|----------|--------|
-| `extensao_gerador_sei/`, `testes_extensao/` | fora do escopo deste repositório (ficam em `../Extensão Gerador SEI/`) |
-| `__pycache__/`, `*.pyc` | cache de bytecode |
-| `processos_sei.db` | banco de dados local |
-| `processos_sei.log`, `*.log` | logs de execução |
-| `uploads/`, `csv/`, `Anexos/` | dados do usuário |
-| `downloads/` | pasta legada de downloads (hoje usa `Downloads/arquivos_pgt`) |
-| `keepalive.json` | estado de execução do keep-alive |
-| `venv/`, `.env` | ambiente virtual e segredos |
-
----
-
 ## Logs
 
 - **Console**: saída em tempo real no terminal
