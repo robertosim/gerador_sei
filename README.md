@@ -1,6 +1,6 @@
 # Gerador SEI
 
-Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e no **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
+Sistema automatizado de **geração de processos**, **anexação de documentos** e **downloads de espelhos** no **SEI** e na **PGT** do INCRA, com interface web local (Flask) e automação web via Playwright.
 
 ---
 
@@ -9,7 +9,7 @@ Sistema automatizado de **geração de processos**, **anexação de documentos**
 O Gerador SEI recebe uma planilha CSV com os dados dos beneficiários e:
 
 1. **Gera** o processo de cada beneficiário no SEI (aba **Gerar**);
-2. **Baixa** o Espelho da Unidade Familiar de cada um no PGT (aba **Baixar**);
+2. **Baixa** o Espelho da Unidade Familiar de cada um na PGT (aba **Baixar**);
 3. **Anexa** os PDFs de cada um ao respectivo processo SEI (aba **Anexar**).
 
 Tudo é controlado por um único painel em `http://localhost:5000`, com barra de progresso, passo atual, pausa/cancelamento e log unificado por aba.
@@ -21,7 +21,7 @@ Tudo é controlado por um único painel em `http://localhost:5000`, com barra de
 - **Upload de CSV**: importa a planilha (código SIPRA, nome, nº do processo) — **reimportar faz merge** (mantém PDF, status e registros fora do CSV)
 - **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo (**padrão duas letras + dígitos**: `MS001200000001`); o upload reporta `associados / novos / ignorados`
 - **Geração de Processos**: CSV → processo novo no SEI, com captura do NUP gerado e exportação de relatório consolidado
-- **Downloads do PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `Downloads/arquivos_pgt` (pasta criada automaticamente), **reutilizando a aba do PGT já aberta e logada**
+- **Downloads da PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `Downloads/arquivos_pgt` (pasta criada automaticamente), **reutilizando a aba da PGT já aberta e logada**
 - **Anexação Automatizada**: navegação e preenchimento de formulários no SEI via Playwright
 - **Painel de Controle**: interface em **abas (Gerar | Baixar | Anexar | Log)** com barra de progresso por aba, **passo atual** e **caixa dos últimos erros** em tempo real
 - **Fila inteligente de anexação**: usa o processo do CSV ou, na falta, o **NUP gerado** na aba Gerar
@@ -55,14 +55,8 @@ gerador_sei/
 └── processos_sei.log        # Log (gerado em execução)          [não versionado]
 ```
 
-> Os espelhos do PGT vão para `Downloads/arquivos_pgt` (pasta do Windows,
+> Os espelhos da PGT vão para `Downloads/arquivos_pgt` (pasta do Windows,
 > criada no início de cada execução) — fora do projeto de propósito.
-
-> **Fora deste repositório** (mantidos apenas na máquina de desenvolvimento, já que
-> não sobem para o GitHub): a pasta irmã `../Extensão Gerador SEI/`, que guarda a
-> extensão Chrome (`extensao_gerador_sei/`) e os testes automatizados
-> (`testes_extensao/`), além de tudo o que o `.gitignore` exclui (dados, banco,
-> logs e estado de execução).
 
 ---
 
@@ -128,17 +122,17 @@ O painel fica disponível em **http://localhost:5000**.
    mais status/erros de geração, download e anexo, NUP gerado, arquivo baixado e
    datas (separador `;`, UTF-8 com BOM)
 
-### Aba Baixar — espelhos do PGT
+### Aba Baixar — espelhos da PGT
 
 1. Os códigos dos beneficiários vêm do CSV carregado na aba Gerar
-2. Faça login em https://pgt.incra.gov.br **na aba do PGT aberta no Chrome debug**
+2. Faça login em https://pgt.incra.gov.br **na aba da PGT aberta no Chrome debug**
 3. Clique em **Baixar**: a barra mostra `baixando X de Y`
-4. O robô **reutiliza essa mesma aba do PGT** (não abre outra); se a sessão
+4. O robô **reutiliza essa mesma aba da PGT** (não abre outra); se a sessão
    expirou, ele **aborta antes de clicar** em *Baixar relatório* — refaça o login
    e clique em Baixar de novo
 5. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
    **Executar novamente (erros)** recoloca na fila os downloads com falha
-6. Os arquivos vão para `Downloads/arquivos_pgt` com o nome original sugerido pelo
+6. Os arquivos vão para `Downloads/arquivos_pgt` com o nome original sugerido pela
    PGT (ex.: `unidade-familiar-MS001200000001.pdf`); arquivo repetido ganha o
    sufixo `_<código>`
 
@@ -303,7 +297,7 @@ Há também:
 | CSV não carrega | Verifique o encoding (UTF-8 ou CP1252) e o delimitador (`;`) |
 | PDF não associa | O nome do arquivo precisa conter o código do CSV no padrão **2 letras + dígitos** (`MS001200000001`), com ou sem separadores |
 | Configuração não salva | Abra as Configurações do Anexo pela própria aba Anexar e clique em **Salvar Configurações**; veja o log em `processos_sei.log` |
-| Download não começa | Sessão expirada no PGT aborta de propósito; refaça o login na aba do PGT |
+| Download não começa | Sessão expirada na PGT aborta de propósito; refaça o login na aba da PGT |
 | Onde ficam os espelhos | `C:\Users\<usuário>\Downloads\arquivos_pgt` (criada automaticamente ao iniciar o download) |
 | Anexação falha no SEI | Verifique se está logado no SEI no Chrome debugado |
 | Formulário não encontrado | O SEI pode ter alterado a estrutura de frames |
@@ -321,6 +315,14 @@ Há também:
 
 ---
 
-## Autor
+## Suporte
+
+Desenvolvido por **Roberto Simões**
+
+| Canal | Contato |
+|-------|---------|
+| E-mail | robsimoes@gmail.com |
+| WhatsApp | +55 (48) 99679-3828 |
+| LinkedIn | linkedin.com/in/robertosim |
 
 Desenvolvido para uso interno do **INCRA** — Instituto Nacional de Colonização e Reforma Agrária.
