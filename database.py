@@ -1,4 +1,5 @@
 import logging
+import re
 import sqlite3
 import os
 
@@ -289,3 +290,108 @@ def log_msg(msg):
         lg.info(msg)
     else:
         print(msg)
+
+
+def _normalizar_coringa(s):
+    import unicodedata
+    s = unicodedata.normalize('NFKD', s or '')
+    s = s.encode('ascii', 'ignore').decode('ascii')
+    s = s.lower().strip()
+    s = s.replace('_', ' ').replace('-', ' ')
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
+def processar_nome_arvore_template(template_str, registro=None):
+    """Mesla campos coringas {{...}} com valores do registro.
+
+    Exemplo: "TD {{Código SIPRA}} {{Nome Titular 1}}" ->
+             "TD SC0123 JOAO SILVA"
+
+    Coringa sem valor no registro fica visivel no texto (em vez de virar
+    string vazia), assim a coluna "Nome na Arvore" nunca some e o problema
+    (falta de CSV, por exemplo) aparece na cara.
+
+    Args:
+        template_str: texto com zero ou N coringas entre {{ }}.
+        registro: dict/sqlite.Row com os campos do banco, ou string
+            legada contendo apenas o cod_sipra.
+    """
+    if not template_str:
+        return template_str
+
+    if registro is None:
+        dados = {}
+    elif isinstance(registro, str):
+        dados = {'cod_sipra': registro}
+    elif isinstance(registro, dict):
+        dados = registro
+    else:
+        try:
+            dados = dict(registro)
+        except Exception:
+            dados = {'cod_sipra': str(registro)}
+
+    def _valor(chave_normalizada):
+        mapa = {
+            'codigo sipra': dados.get('cod_sipra', ''),
+            'cod sipra': dados.get('cod_sipra', ''),
+            'cod_sipra': dados.get('cod_sipra', ''),
+            'codsipra': dados.get('cod_sipra', ''),
+            'codigo beneficiario': dados.get('cod_sipra', ''),
+            'codigo do beneficiario': dados.get('cod_sipra', ''),
+            'cod beneficiario': dados.get('cod_sipra', ''),
+            'nome titular 1': dados.get('nome', ''),
+            'nome titular': dados.get('nome', ''),
+            'nome beneficiario': dados.get('nome', ''),
+            'nome': dados.get('nome', ''),
+            'beneficiario': dados.get('nome', ''),
+            'titular': dados.get('nome', ''),
+            'titular 1': dados.get('nome', ''),
+            'n processo sei': dados.get('processo_sei', ''),
+            'no processo sei': dados.get('processo_sei', ''),
+            'numero processo sei': dados.get('processo_sei', ''),
+            'processo sei': dados.get('processo_sei', ''),
+            'processo': dados.get('processo_sei', ''),
+            'nup': dados.get('processo_sei', ''),
+            'nup processo': dados.get('processo_sei', ''),
+            'processo_sei': dados.get('processo_sei', ''),
+            'pdf anexo': dados.get('pdf_anexo', ''),
+            'pdf': dados.get('pdf_anexo', ''),
+            'arquivo': dados.get('pdf_anexo', ''),
+            'pdf_anexo': dados.get('pdf_anexo', ''),
+            'tipo documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
+            'tipo do documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
+            'tipo': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
+            'serie': dados.get('tipo_documento', ''),
+            'tipo_documento': dados.get('tipo_documento', ''),
+            'tipo_documento_nome': dados.get('tipo_documento_nome', ''),
+            'hipotese legal': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
+            'hipotese': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
+            'hipotese_legal': dados.get('hipotese_legal', ''),
+            'hipotese_legal_nome': dados.get('hipotese_legal_nome', ''),
+            'nivel acesso': dados.get('nivel_acesso', ''),
+            'nivel de acesso': dados.get('nivel_acesso', ''),
+            'nivel': dados.get('nivel_acesso', ''),
+            'nivel_acesso': dados.get('nivel_acesso', ''),
+            'data anexo': dados.get('data_anexo', ''),
+            'data': dados.get('data_anexo', ''),
+            'data_anexo': dados.get('data_anexo', ''),
+        }
+        if chave_normalizada in mapa:
+            return mapa[chave_normalizada]
+        # tenta acesso direto por nome de coluna
+        if chave_normalizada in dados:
+            return dados.get(chave_normalizada, '')
+        return ''
+
+    def _substituir(match):
+        inner = match.group(1).strip()
+        chave = _normalizar_coringa(inner)
+        valor = _valor(chave)
+        if valor is None or str(valor).strip() == '':
+            # Sem dado no registro: mantem o coringa em vez de apagar.
+            return match.group(0)
+        return str(valor)
+
+    return re.sub(r'\{\{\s*(.*?)\s*\}\}', _substituir, template_str)

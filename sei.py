@@ -5,7 +5,8 @@ import json
 import threading
 import traceback
 from playwright.sync_api import sync_playwright
-from database import get_db, log_msg, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO
+from database import (get_db, log_msg, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO,
+                      processar_nome_arvore_template)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOADS_DIR = os.path.join(BASE_DIR, 'uploads')
@@ -1877,12 +1878,15 @@ def baixar_espelho(page, cod, nome=''):
     if falha:
         return (False, f'Download interrompido no PGT: {falha}')
 
-    # Nome original sugerido pelo PGT, sempre dentro de Downloads/arquivos_pgt.
+    # Sempre o nome original sugerido pelo PGT dentro de Downloads/arquivos_pgt.
+    # Arquivo ja existente e sobrescrito: o nome nunca ganha sufixo "_<codigo>".
     nome_original = os.path.basename(download.suggested_filename or f'espelho_{cod}.pdf')
     alvo = os.path.join(ESPELHOS_DIR, nome_original)
     if os.path.exists(alvo):
-        base, ext = os.path.splitext(nome_original)
-        alvo = os.path.join(ESPELHOS_DIR, f'{base}_{cod}{ext}')
+        try:
+            os.remove(alvo)
+        except OSError as e:
+            log_msg(f'BAIXAR [{cod}]: aviso ao remover {alvo}: {e}')
 
     try:
         download.save_as(alvo)
@@ -2196,7 +2200,13 @@ def run_sei():
 
                 sessao_expirada = False
                 try:
-                    sucesso, detalhe_erro = anexar_arquivo_no_sei(page, processo_sei, caminho_pdf, config, reg.get('nome_arvore'))
+                    # O banco guarda o TEMPLATE (ex.: {{Nome}}); resolve agora,
+                    # com os dados atuais do registro, e so cai no padrao da
+                    # configuracao se sobrar texto vazio.
+                    nome_arvore_tpl = (reg.get('nome_arvore') or '').strip() \
+                        or str(config.get('nome_arvore') or '').strip()
+                    nome_arvore_final = processar_nome_arvore_template(nome_arvore_tpl, reg) or nome_arvore_tpl
+                    sucesso, detalhe_erro = anexar_arquivo_no_sei(page, processo_sei, caminho_pdf, config, nome_arvore_final)
                 except InterrupcaoExecucao:
                     status_final = _motivo_interrupcao(sei_state)
                     _registrar_status(f'Interrompido no meio do registro {cod_sipra} ({status_final}) '

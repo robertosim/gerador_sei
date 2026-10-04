@@ -133,8 +133,8 @@ O painel fica disponível em **http://localhost:5000**.
 5. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
    **Executar novamente (erros)** recoloca na fila os downloads com falha
 6. Os arquivos vão para `Downloads/arquivos_pgt` com o nome original sugerido pela
-   PGT (ex.: `unidade-familiar-MS001200000001.pdf`); arquivo repetido ganha o
-   sufixo `_<código>`
+   PGT (ex.: `unidade-familiar-MS001200000001.pdf`); arquivo já existente é
+   **sobrescrito** — o nome nunca ganha sufixo
 
 ### Aba Anexar — documentos no SEI
 

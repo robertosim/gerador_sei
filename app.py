@@ -15,7 +15,8 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, request, jsonify, Response
 from werkzeug.exceptions import HTTPException
-from database import get_db, init_db, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO, DB_PATH
+from database import (get_db, init_db, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO, DB_PATH,
+                      processar_nome_arvore_template)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE_DIR, 'processos_sei.log')
@@ -583,7 +584,10 @@ def get_registros():
     resultado = []
     for r in rows:
         item = dict(r)
-        item['nome_arvore_processado'] = processar_nome_arvore_template(item.get('nome_arvore'), item)
+        # Mostra o nome ja resolvido; se faltar dado no registro (sem CSV),
+        # mostra o proprio coringa em vez de deixar a coluna vazia.
+        processado = processar_nome_arvore_template(item.get('nome_arvore'), item)
+        item['nome_arvore_processado'] = processado or item.get('nome_arvore') or ''
         resultado.append(item)
     return jsonify(resultado)
 
@@ -640,104 +644,6 @@ def get_stats():
     })
 
 
-def _normalizar_coringa(s):
-    import unicodedata
-    s = unicodedata.normalize('NFKD', s or '')
-    s = s.encode('ascii', 'ignore').decode('ascii')
-    s = s.lower().strip()
-    s = s.replace('_', ' ').replace('-', ' ')
-    s = re.sub(r'\s+', ' ', s)
-    return s
-
-
-def processar_nome_arvore_template(template_str, registro=None):
-    """Mescla campos coringas {{...}} com valores do registro.
-
-    Exemplo: "TD {{Código SIPRA}} {{Nome Titular 1}}" ->
-             "TD SC0123 JOAO SILVA"
-
-    Args:
-        template_str: texto com zero ou N coringas entre {{ }}.
-        registro: dict/sqlite.Row com os campos do banco, ou string
-            legada contendo apenas o cod_sipra.
-    """
-    if not template_str:
-        return template_str
-
-    if registro is None:
-        dados = {}
-    elif isinstance(registro, str):
-        dados = {'cod_sipra': registro}
-    elif isinstance(registro, dict):
-        dados = registro
-    else:
-        try:
-            dados = dict(registro)
-        except Exception:
-            dados = {'cod_sipra': str(registro)}
-
-    def _valor(chave_normalizada):
-        mapa = {
-            'codigo sipra': dados.get('cod_sipra', ''),
-            'cod sipra': dados.get('cod_sipra', ''),
-            'cod_sipra': dados.get('cod_sipra', ''),
-            'codsipra': dados.get('cod_sipra', ''),
-            'codigo beneficiario': dados.get('cod_sipra', ''),
-            'codigo do beneficiario': dados.get('cod_sipra', ''),
-            'cod beneficiario': dados.get('cod_sipra', ''),
-            'nome titular 1': dados.get('nome', ''),
-            'nome titular': dados.get('nome', ''),
-            'nome beneficiario': dados.get('nome', ''),
-            'nome': dados.get('nome', ''),
-            'beneficiario': dados.get('nome', ''),
-            'titular': dados.get('nome', ''),
-            'titular 1': dados.get('nome', ''),
-            'n processo sei': dados.get('processo_sei', ''),
-            'no processo sei': dados.get('processo_sei', ''),
-            'numero processo sei': dados.get('processo_sei', ''),
-            'processo sei': dados.get('processo_sei', ''),
-            'processo': dados.get('processo_sei', ''),
-            'nup': dados.get('processo_sei', ''),
-            'nup processo': dados.get('processo_sei', ''),
-            'processo_sei': dados.get('processo_sei', ''),
-            'pdf anexo': dados.get('pdf_anexo', ''),
-            'pdf': dados.get('pdf_anexo', ''),
-            'arquivo': dados.get('pdf_anexo', ''),
-            'pdf_anexo': dados.get('pdf_anexo', ''),
-            'tipo documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'tipo do documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'tipo': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'serie': dados.get('tipo_documento', ''),
-            'tipo_documento': dados.get('tipo_documento', ''),
-            'tipo_documento_nome': dados.get('tipo_documento_nome', ''),
-            'hipotese legal': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
-            'hipotese': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
-            'hipotese_legal': dados.get('hipotese_legal', ''),
-            'hipotese_legal_nome': dados.get('hipotese_legal_nome', ''),
-            'nivel acesso': dados.get('nivel_acesso', ''),
-            'nivel de acesso': dados.get('nivel_acesso', ''),
-            'nivel': dados.get('nivel_acesso', ''),
-            'nivel_acesso': dados.get('nivel_acesso', ''),
-            'data anexo': dados.get('data_anexo', ''),
-            'data': dados.get('data_anexo', ''),
-            'data_anexo': dados.get('data_anexo', ''),
-        }
-        if chave_normalizada in mapa:
-            return mapa[chave_normalizada]
-        # tenta acesso direto por nome de coluna
-        if chave_normalizada in dados:
-            return dados.get(chave_normalizada, '')
-        return ''
-
-    def _substituir(match):
-        inner = match.group(1).strip()
-        chave = _normalizar_coringa(inner)
-        valor = _valor(chave)
-        return '' if valor is None else str(valor)
-
-    return re.sub(r'\{\{\s*(.*?)\s*\}\}', _substituir, template_str)
-
-
 @app.route('/api/config', methods=['GET'])
 def get_config():
     db = get_db()
@@ -781,10 +687,6 @@ def save_config():
 
         # Campo em branco na configuracao NAO apaga o que o registro ja tinha:
         # em massa so entra o que foi preenchido aqui.
-        nomes_tipo = {str(r['codigo']): r['nome']
-                      for r in db.execute('SELECT codigo, nome FROM tipo_documento')}
-        nomes_hip = {str(r['codigo']): r['nome']
-                     for r in db.execute('SELECT codigo, nome FROM hipotese_legal')}
 
         rows = db.execute('SELECT * FROM anexos_sei').fetchall()
         for row in rows:
@@ -794,17 +696,14 @@ def save_config():
             nivel_final = nivel or str(atual.get('nivel_acesso') or '1')
             template = nome_arvore or str(atual.get('nome_arvore') or '')
 
-            reg = dict(atual)
-            reg['tipo_documento'] = tipo_final
-            reg['tipo_documento_nome'] = nomes_tipo.get(tipo_final, '')
-            reg['nivel_acesso'] = nivel_final
-            reg['hipotese_legal'] = hip_final
-            reg['hipotese_legal_nome'] = nomes_hip.get(hip_final, '')
-            nome_arvore_processado = processar_nome_arvore_template(template, reg)
+            # Guarda o TEMPLATE, nao o valor resolvido: o nome final e
+            # calculado na hora de exibir/anexar, quando o registro ja tiver
+            # os dados do CSV (nome, processo, ...). Assim nada se perde
+            # mesmo que o coringa ainda nao tenha dado para substituir.
             db.execute('''UPDATE anexos_sei
                          SET tipo_documento = ?, nome_arvore = ?, nivel_acesso = ?, hipotese_legal = ?
                          WHERE id = ?''',
-                      (tipo_final, nome_arvore_processado, nivel_final, hip_final, row['id']))
+                      (tipo_final, template, nivel_final, hip_final, row['id']))
 
         db.commit()
         db.close()
