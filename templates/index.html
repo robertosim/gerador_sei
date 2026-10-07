@@ -37,12 +37,12 @@
                             </select>
                         </div>
                         <div class="form-group full">
-                            <label>Especificacao: (coringas {{ '{{Nome Titular 1}}' }})</label>
-                            <input type="text" id="gerar-especificacao" placeholder="Ex: CCIR {{ '{{Nome Titular 1}}' }}">
+                            <label>Especificacao: (coringas {{ '{{Nome Titular 1}}' }}, {{ '{{Código SIPRA}}' }}, ou coluna do CSV, ex.: {{ '{{Lote}}' }})</label>
+                            <input type="text" id="gerar-especificacao" placeholder="Ex: Beneficiário {{ '{{Nome Titular 1}}' }}">
                         </div>
                         <div class="form-group full">
                             <label>Observacoes desta unidade</label>
-                            <input type="text" id="gerar-observacoes" placeholder="Ex: CCIR {{ '{{Nome Titular 1}}' }}">
+                            <input type="text" id="gerar-observacoes" placeholder="Ex: Beneficiário(a) {{ '{{Nome Titular 1}}' }}">
                         </div>
                         <div class="form-group full">
                             <label>Nivel de Acesso</label>
@@ -231,16 +231,8 @@
                                 </select>
                         </div>
                         <div class="form-group">
-                            <label>Nome na Arvore: (coringas {{ '{{Nome Titular 1}}' }})</label>
-                            <input type="text" id="cfg-nome-arvore" placeholder="Ex: CCIR">
-                        </div>
-                        <div class="form-group">
-                            <label>Grau de Sigilo</label>
-                            <select id="cfg-sigilo">
-                                <option value="R">Reservado</option>
-                                <option value="U">Urgente</option>
-                                <option value="S">Sigiloso</option>
-                            </select>
+                            <label>Nome na Arvore: (coringas {{ '{{Nome Titular 1}}' }}, {{ '{{Código SIPRA}}' }}, ou coluna do CSV, ex.: {{ '{{Lote}}' }})</label>
+                            <input type="text" id="cfg-nome-arvore" placeholder="Ex: {{ '{{Nome Titular 1}}' }}">
                         </div>
                         <div class="form-group">
                             <label>Hipotese Legal</label>
@@ -309,6 +301,7 @@
                                 <th>Tipo Documento</th>
                                 <th>Nome na Árvore</th>
                                 <th>PDF Anexo</th>
+                                <th>Data Anexo</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
@@ -338,15 +331,28 @@
     </div>
 
     <footer class="rodape">
-        <span>Sessao SEI (keep-alive):</span>
-        <span id="ka-status" class="ka-status">-</span>
-        <label style="display:inline-flex; align-items:center; gap:6px;">a cada
-            <input type="number" id="ka-intervalo" min="30" step="10" value="60"
-                   style="width:70px; padding:4px 6px; border:1px solid #ccc; border-radius:6px;"
-                   onchange="keepaliveIntervalo()"> s
-        </label>
-        <button class="btn btn-secondary" id="ka-btn" onclick="keepaliveToggle()">Ativar/Desativar</button>
-        <button class="btn btn-secondary" onclick="keepaliveAgora()">Recarregar agora</button>
+        <div class="ka-linha">
+            <span>Keep-alive SEI:</span>
+            <span id="ka-status" class="ka-status">-</span>
+            <label style="display:inline-flex; align-items:center; gap:6px;">a cada
+                <input type="number" id="ka-intervalo" min="30" step="10" value="60"
+                       style="width:70px; padding:4px 6px; border:1px solid #ccc; border-radius:6px;"
+                       onchange="keepaliveIntervalo('sei')"> s
+            </label>
+            <button class="btn btn-secondary" id="ka-btn" onclick="keepaliveToggle('sei')">Ativar/Desativar</button>
+            <button class="btn btn-secondary" onclick="keepaliveAgora('sei')">Recarregar agora</button>
+        </div>
+        <div class="ka-linha">
+            <span>Keep-alive PGT:</span>
+            <span id="ka-pgt-status" class="ka-status">-</span>
+            <label style="display:inline-flex; align-items:center; gap:6px;">a cada
+                <input type="number" id="ka-pgt-intervalo" min="30" step="10" value="60"
+                       style="width:70px; padding:4px 6px; border:1px solid #ccc; border-radius:6px;"
+                       onchange="keepaliveIntervalo('pgt')"> s
+            </label>
+            <button class="btn btn-secondary" id="ka-pgt-btn" onclick="keepaliveToggle('pgt')">Ativar/Desativar</button>
+            <button class="btn btn-secondary" onclick="keepaliveAgora('pgt')">Recarregar agora</button>
+        </div>
     </footer>
 
     <div class="toast" id="toast"></div>
@@ -661,7 +667,7 @@
                     return `<tr>
                         <td><b>${esc(r.cod_beneficiario)}</b></td>
                         <td>${esc(r.nome) || '<span style="color:#666">-</span>'}</td>
-                        <td>${esc(r.processo_gerado) || '<span style="color:#666">-</span>'}</td>
+                        <td>${esc(r.processo_sei) || '<span style="color:#666">-</span>'}</td>
                         <td>${badge}</td>
                         <td style="max-width:300px;font-size:12px;color:#a33;word-break:break-word;">${esc(r.erro)}</td>
                     </tr>`;
@@ -1096,7 +1102,6 @@
                 const cfg = await res.json();
                 const set = (id, v) => { const el = $(id); if (el) el.value = v; };
                 set('cfg-serie', cfg.serie || '82');
-                set('cfg-sigilo', cfg.sigilo || 'R');
                 set('cfg-nome-arvore', cfg.nome_arvore || 'CCIR');
                 set('cfg-hipotese', cfg.hipotese || '4');
                 const nivel = cfg.nivel || '1';
@@ -1120,7 +1125,6 @@
             try {
                 cfg = {
                     serie: valorDe('cfg-serie'),
-                    sigilo: valorDe('cfg-sigilo', 'R'),
                     nome_arvore: valorDe('cfg-nome-arvore'),
                     hipotese: valorDe('cfg-hipotese'),
                     nivel: document.querySelector('input[name="cfg-nivel"]:checked')?.value || '1'
@@ -1240,13 +1244,8 @@
                     statusBadge = '<span class="badge badge-pendente">Pendente</span>';
                 }
 
-                const nup = r.processo_sei || r.processo_gerado || '';
-                const nupGerado = !r.processo_sei && r.processo_gerado;
-                const nupHtml = nup
-                    ? (nupGerado
-                        ? `<span style="color:#1a6a3a" title="NUP gerado na Geracao de Processos">${esc(nup)}</span>`
-                        : esc(nup))
-                    : '<span style="color:#666">-</span>';
+                const nup = r.processo_sei || '';
+                const nupHtml = nup ? esc(nup) : '<span style="color:#666">-</span>';
                 return `<tr>
                     <td><b>${r.cod_sipra}</b></td>
                     <td class="editavel" data-campo="nome" data-id="${r.id}" data-valor="${r.nome || ''}">${r.nome || '<span style="color:#666">-</span>'}</td>
@@ -1254,6 +1253,7 @@
                     <td class="editavel" data-campo="tipo_documento" data-id="${r.id}" data-valor="${r.tipo_documento || ''}">${r.tipo_documento_nome || '<span style="color:#666">-</span>'}</td>
                     <td class="editavel" data-campo="nome_arvore" data-id="${r.id}" data-valor="${r.nome_arvore || ''}">${r.nome_arvore_processado || '<span style="color:#666">-</span>'}</td>
                     <td class="editavel" data-campo="pdf_anexo" data-id="${r.id}" data-valor="${r.pdf_anexo || ''}">${r.pdf_anexo || '<span style="color:#666">-</span>'}</td>
+                    <td>${r.data_anexo ? esc(r.data_anexo) : '<span style="color:#666">-</span>'}</td>
                     <td>${statusBadge}</td>
                 </tr>`;
             }).join('');
@@ -1326,7 +1326,6 @@
                 (r.cod_sipra || '').toLowerCase().includes(t) ||
                 (r.nome || '').toLowerCase().includes(t) ||
                 (r.processo_sei || '').toLowerCase().includes(t) ||
-                (r.processo_gerado || '').toLowerCase().includes(t) ||
                 (r.tipo_documento_nome || '').toLowerCase().includes(t) ||
                 (r.nome_arvore_processado || '').toLowerCase().includes(t)
             );
@@ -1334,11 +1333,20 @@
         }
 
         // -------------------------------------------------------- KEEPALIVE
-        function atualizarStatusKeepalive(ka) {
+        // Dois keep-alives independentes (SEI e PGT), cada um com seu
+        // estado/intervalo gravados no banco (tabela config_keepalive).
+        const KA_ALVOS = ['sei', 'pgt'];
+        const KA_ROTULO = { sei: 'SEI', pgt: 'PGT' };
+
+        function kaId(base, alvo) {
+            return alvo === 'pgt' ? base.replace('ka-', 'ka-pgt-') : base;
+        }
+
+        function atualizarStatusKeepalive(ka, alvo) {
             if (!ka) return;
-            const kaEl = $('ka-status');
-            const btn = $('ka-btn');
-            const intervalo = $('ka-intervalo');
+            const kaEl = $(kaId('ka-status', alvo));
+            const btn = $(kaId('ka-btn', alvo));
+            const intervalo = $(kaId('ka-intervalo', alvo));
             if (intervalo && ka.intervalo && document.activeElement !== intervalo) {
                 intervalo.value = Number(ka.intervalo) || 60;
             }
@@ -1348,68 +1356,74 @@
                     + (ka.ultimo_erro ? ` | ${ka.ultimo_erro}` : '');
                 kaEl.style.color = ka.ativo ? '#1a6a3a' : '#8a1f1f';
             }
-            if (btn) btn.textContent = ka.ativo ? 'Desativar keep-alive' : 'Ativar keep-alive';
+            if (btn) btn.textContent = ka.ativo ? 'Desativar' : 'Ativar';
         }
 
         async function atualizarKeepalive() {
             try {
                 const res = await fetch('/api/keepalive');
-                atualizarStatusKeepalive(await res.json());
+                const d = await res.json();
+                KA_ALVOS.forEach(alvo => atualizarStatusKeepalive(d[alvo], alvo));
             } catch (e) {
                 /* ignora erro de conexao no polling de status */
             }
         }
 
-        async function keepaliveToggle() {
+        async function keepaliveToggle(alvo) {
+            alvo = alvo || 'sei';
             try {
                 const res = await fetch('/api/keepalive');
-                const ka = await res.json();
-                const novo = !ka.ativo;
-                const intervalo = Math.max(30, Number($('ka-intervalo').value) || 60);
+                const d = await res.json();
+                const novo = !((d[alvo] || {}).ativo);
+                const intervalo = Math.max(30, Number($(kaId('ka-intervalo', alvo)).value) || 60);
                 const res2 = await fetch('/api/keepalive', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ativo: novo, intervalo })
+                    body: JSON.stringify({ alvo, ativo: novo, intervalo })
                 });
                 const d2 = await res2.json();
-                atualizarStatusKeepalive(d2.keepalive || { ativo: novo });
-                showToast('Keep-alive ' + ((d2.keepalive && d2.keepalive.ativo) ? 'ativado' : 'desativado'), 'success');
+                atualizarStatusKeepalive(d2[alvo] || { ativo: novo }, alvo);
+                showToast('Keep-alive ' + KA_ROTULO[alvo] + (novo ? ' ativado' : ' desativado'), 'success');
             } catch (e) {
                 showToast('Erro de conexao', 'error');
             }
         }
 
-        async function keepaliveIntervalo() {
-            const intervalo = Math.max(30, Number($('ka-intervalo').value) || 60);
-            $('ka-intervalo').value = intervalo;
+        async function keepaliveIntervalo(alvo) {
+            alvo = alvo || 'sei';
+            const campo = $(kaId('ka-intervalo', alvo));
+            const intervalo = Math.max(30, Number(campo.value) || 60);
+            campo.value = intervalo;
             try {
                 const res = await fetch('/api/keepalive', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ intervalo })
+                    body: JSON.stringify({ alvo, intervalo })
                 });
                 const d = await res.json();
-                atualizarStatusKeepalive(d.keepalive || { intervalo });
-                showToast('Intervalo do keep-alive: ' + intervalo + 's', 'success');
+                atualizarStatusKeepalive(d[alvo] || { intervalo }, alvo);
+                showToast('Intervalo do keep-alive ' + KA_ROTULO[alvo] + ': ' + intervalo + 's', 'success');
             } catch (e) {
                 showToast('Erro de conexao', 'error');
             }
         }
 
-        async function keepaliveAgora() {
-            showToast('Recarregando aba do SEI...', 'success');
+        async function keepaliveAgora(alvo) {
+            alvo = alvo || 'sei';
+            showToast('Recarregando aba do ' + KA_ROTULO[alvo] + '...', 'success');
             try {
                 const res = await fetch('/api/keepalive', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ agora: true })
+                    body: JSON.stringify({ alvo, agora: true })
                 });
                 const d = await res.json();
                 if (d.resultado && d.resultado.ok) {
-                    showToast('Aba do SEI recarregada: ' + (d.resultado.url || ''), 'success');
+                    showToast('Aba do ' + KA_ROTULO[alvo] + ' recarregada: ' + (d.resultado.url || ''), 'success');
                 } else {
-                    showToast('Keep-alive: ' + ((d.resultado && d.resultado.motivo) || 'sem retorno'), 'error');
+                    showToast('Keep-alive ' + KA_ROTULO[alvo] + ': ' + ((d.resultado && d.resultado.motivo) || 'sem retorno'), 'error');
                 }
+                atualizarKeepalive();
             } catch (e) {
                 showToast('Erro de conexao', 'error');
             }

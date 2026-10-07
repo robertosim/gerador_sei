@@ -6,9 +6,10 @@ import threading
 import traceback
 from playwright.sync_api import sync_playwright
 from database import (get_db, log_msg, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO,
-                      processar_nome_arvore_template)
+                      processar_nome_arvore_template, fonte_coringas,
+                      buscar_coringa, _normalizar_coringa, dir_base)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = dir_base()
 UPLOADS_DIR = os.path.join(BASE_DIR, 'uploads')
 # Espelhos do PGT: "arquivos_pgt" dentro da pasta Downloads do Windows
 # (criada na hora em que o download e iniciado).
@@ -47,7 +48,7 @@ sei_state = {
 def carregar_config():
     try:
         db = get_db()
-        row = db.execute('SELECT serie, sigilo, nome_arvore, hipotese, nivel FROM config_anexo LIMIT 1').fetchone()
+        row = db.execute('SELECT serie, nome_arvore, hipotese, nivel FROM config_anexo LIMIT 1').fetchone()
         db.close()
         if row:
             cfg = dict(row)
@@ -79,16 +80,16 @@ def anexar_arquivo_no_sei(page, processo_sei, caminho_pdf, config=None, nome_arv
         config = carregar_config()
 
     serie = config.get('serie', '82')
-    sigilo = config.get('sigilo', 'R')
     hipotese = config.get('hipotese', '4')
     nivel = config.get('nivel', '1')
     nivel_id, nivel_nome = NIVEIS_ACESSO.get(nivel, ('optRestrito', 'Restrito'))
-    
+    nivel_publico = nivel_id == 'optPublico'
+
     nome_arvore = nome_arvore_db if nome_arvore_db else config.get('nome_arvore', 'CCIR')
 
     cod_sipra = os.path.basename(caminho_pdf).split('.')[0] if caminho_pdf else '???'
 
-    log_msg(f"SEI [{cod_sipra}] Config -> Serie={serie}, Sigilo={sigilo}, Arvore={nome_arvore}, Hipotese={hipotese}, Nivel={nivel_nome}")
+    log_msg(f"SEI [{cod_sipra}] Config -> Serie={serie}, Arvore={nome_arvore}, Hipotese={hipotese}, Nivel={nivel_nome}")
 
     # PASSO 1: Acessar SEI
     _log_step(cod_sipra, 1, "Acessando SEI...")
@@ -330,69 +331,61 @@ def anexar_arquivo_no_sei(page, processo_sei, caminho_pdf, config=None, nome_arv
         _log_step(cod_sipra, 10, f"FALHA ao selecionar nivel de acesso {nivel_nome}: {e}")
         raise
 
-    # PASSO 11: Aguardar Hipotese Legal via AJAX
-    _log_step(cod_sipra, 11, f"Aguardando Hipotese Legal via AJAX (valor={hipotese})...")
-    try:
-        frame_form.wait_for_selector(f'#selHipoteseLegal option[value="{hipotese}"]', state="attached", timeout=15000)
-    except Exception as e:
-        _log_step(cod_sipra, 11, f"AVISO: Hipotese Legal option[value={hipotese}] nao encontrada via AJAX, aguardando 3s: {e}")
-        time.sleep(3)
+    # PASSO 11: Aguardar Hipotese Legal via AJAX + PASSO 12: definir.
+    # O SEI so mostra a Hipotese Legal quando o nivel de acesso NAO e publico:
+    # nivel publico pula as duas etapas (o passo nao aparece no log).
+    if nivel_publico:
+        log_msg(f"SEI [{cod_sipra}] Nivel de acesso publico: Hipotese Legal nao "
+                f"exibida pelo SEI (etapas 11 e 12 ignoradas)")
+    else:
+        _log_step(cod_sipra, 11, f"Aguardando Hipotese Legal via AJAX (valor={hipotese})...")
+        try:
+            frame_form.wait_for_selector(f'#selHipoteseLegal option[value="{hipotese}"]', state="attached", timeout=15000)
+        except Exception as e:
+            _log_step(cod_sipra, 11, f"AVISO: Hipotese Legal option[value={hipotese}] nao encontrada via AJAX, aguardando 3s: {e}")
+            time.sleep(3)
 
-    # PASSO 12: Grau de Sigilo
-    _log_step(cod_sipra, 12, f"Definindo Grau de Sigilo: {sigilo}...")
-    try:
-        frame_form.evaluate(f"""
-            var sel = document.getElementById('selGrauSigilo');
-            sel.style.display = 'block';
-            sel.value = '{sigilo}';
-            sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        """)
-        time.sleep(1)
-    except Exception as e:
-        _log_step(cod_sipra, 12, f"FALHA ao definir grau de sigilo {sigilo}: {e}")
-        raise
+        # PASSO 12: Hipotese Legal
+        _log_step(cod_sipra, 12, f"Definindo Hipotese Legal: valor={hipotese}...")
+        try:
+            frame_form.evaluate("""
+                window.scrollBy(0, 500);
+                var sel = document.getElementById('selHipoteseLegal');
+                sel.style.display = 'block';
+                sel.scrollIntoView({behavior: 'smooth', block: 'center'});
+            """)
+            time.sleep(1)
+            frame_form.evaluate(f"""
+                var sel = document.getElementById('selHipoteseLegal');
+                sel.value = '{hipotese}';
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            """)
+            time.sleep(1)
+        except Exception as e:
+            _log_step(cod_sipra, 12, f"FALHA ao definir hipotese legal {hipotese}: {e}")
+            raise
 
-    # PASSO 13: Hipotese Legal
-    _log_step(cod_sipra, 13, f"Definindo Hipotese Legal: valor={hipotese}...")
-    try:
-        frame_form.evaluate("""
-            window.scrollBy(0, 500);
-            var sel = document.getElementById('selHipoteseLegal');
-            sel.style.display = 'block';
-            sel.scrollIntoView({behavior: 'smooth', block: 'center'});
-        """)
-        time.sleep(1)
-        frame_form.evaluate(f"""
-            var sel = document.getElementById('selHipoteseLegal');
-            sel.value = '{hipotese}';
-            sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        """)
-        time.sleep(1)
-    except Exception as e:
-        _log_step(cod_sipra, 13, f"FALHA ao definir hipotese legal {hipotese}: {e}")
-        raise
-
-    # PASSO 14: Anexar PDF
-    _log_step(cod_sipra, 14, f"Anexando PDF: {caminho_pdf}")
+    # PASSO 13: Anexar PDF
+    _log_step(cod_sipra, 13, f"Anexando PDF: {caminho_pdf}")
     try:
         frame_form.locator('#filArquivo').set_input_files(caminho_pdf)
         time.sleep(8)
     except Exception as e:
-        _log_step(cod_sipra, 14, f"FALHA ao anexar PDF {caminho_pdf}: {e}")
+        _log_step(cod_sipra, 13, f"FALHA ao anexar PDF {caminho_pdf}: {e}")
         raise
 
-    # PASSO 15: Clicar em Salvar
-    _log_step(cod_sipra, 15, "Clicando em Salvar...")
+    # PASSO 14: Clicar em Salvar
+    _log_step(cod_sipra, 14, "Clicando em Salvar...")
     try:
         frame_form.locator('#btnSalvar').first.click()
         page.wait_for_load_state("networkidle")
         time.sleep(5)
     except Exception as e:
-        _log_step(cod_sipra, 15, f"FALHA ao clicar em Salvar: {e}")
+        _log_step(cod_sipra, 14, f"FALHA ao clicar em Salvar: {e}")
         raise
 
-    # PASSO 16: Verificar resultado (so mensagens visiveis, como na extensao)
-    _log_step(cod_sipra, 16, "Verificando resultado...")
+    # PASSO 15: Verificar resultado (so mensagens visiveis, como na extensao)
+    _log_step(cod_sipra, 15, "Verificando resultado...")
     erros = []
     sucessos = []
     for frame in page.frames:
@@ -410,23 +403,23 @@ def anexar_arquivo_no_sei(page, processo_sei, caminho_pdf, config=None, nome_arv
             except Exception:
                 continue
     for texto in dict.fromkeys(sucessos):
-        _log_step(cod_sipra, 16, f"Mensagem SEI: {texto}")
+        _log_step(cod_sipra, 15, f"Mensagem SEI: {texto}")
 
     if erros:
         msg = ' | '.join(dict.fromkeys(erros))[:400]
-        _log_step(cod_sipra, 16, f"FALHA: SEI retornou erro: {msg}")
-        return (False, f'PASSO 16: SEI retornou erro: {msg}')
+        _log_step(cod_sipra, 15, f"FALHA: SEI retornou erro: {msg}")
+        return (False, f'PASSO 15: SEI retornou erro: {msg}')
 
-    # PASSO 17: Confirmar (Enter)
-    _log_step(cod_sipra, 17, "Pressionando Enter para confirmar...")
+    # PASSO 16: Confirmar (Enter)
+    _log_step(cod_sipra, 16, "Pressionando Enter para confirmar...")
     try:
         page.keyboard.press("Enter")
         page.wait_for_load_state("networkidle")
         time.sleep(2)
     except Exception as e:
-        _log_step(cod_sipra, 17, f"AVISO: Falha ao pressionar Enter: {e}")
+        _log_step(cod_sipra, 16, f"AVISO: Falha ao pressionar Enter: {e}")
 
-    _log_step(cod_sipra, 17, "SUCESSO: Documento anexado.")
+    _log_step(cod_sipra, 16, "SUCESSO: Documento anexado.")
     return (True, "")
 
 
@@ -547,6 +540,20 @@ keepalive_state = {
     'thread_ativa': False,
 }
 
+# Mesmo formato do keepalive_state, mas para a aba do PGT (aba Baixar)
+keepalive_pgt_state = {
+    'ativo': True,
+    'intervalo': 60,
+    'ultima_recarga': None,
+    'recargas': 0,
+    'ultimo_erro': None,
+    'ultimo_url': None,
+    'thread_ativa': False,
+}
+
+KEEPALIVE_ESTADOS = {'sei': keepalive_state, 'pgt': keepalive_pgt_state}
+_keepalive_ultimo_tick = {'sei': 0.0, 'pgt': 0.0}
+
 SEI_DIALOGO = {'msg': '', 'hora': 0}
 
 
@@ -602,8 +609,12 @@ def carregar_config_geracao():
     return dict(DEFAULT_CONFIG_GERACAO)
 
 
-def renderizar_template(template, dados):
-    """Substitui {{...}} pelos valores do CSV.
+def renderizar_template(template, registro=None):
+    """Substitui {{...}} pelos valores do registro (tabela + colunas do CSV).
+
+    Aceita colunas da tabela (cod_beneficiario, nome, processo_sei, ...),
+    colunas do CSV (dados_csv) e apelidos ({{Código SIPRA}},
+    {{Nome Titular 1}}, ...).
 
     Segmentos separados por '-' que ficarem vazios apos a substituicao
     sao descartados. Ex: "{{Nome Titular 1}} - {{Nome Titular 2}}" ->
@@ -615,41 +626,16 @@ def renderizar_template(template, dados):
     if not template:
         return ''
 
-    def norm(s):
-        import unicodedata
-        s = unicodedata.normalize('NFKD', s or '')
-        s = s.encode('ascii', 'ignore').decode('ascii')
-        s = re.sub(r'[^a-z0-9]+', ' ', s.lower())
-        return re.sub(r'\s+', ' ', s).strip()
+    mapa = fonte_coringas(registro)
 
-    dados_norm = {norm(k): ('' if v is None else str(v).strip())
-                  for k, v in (dados or {}).items()}
-    dados_tokens = []
-    for k, v in dados_norm.items():
-        tk = set(k.split())
-        if tk:
-            dados_tokens.append((tk, v))
-
-    def valor(chave):
-        c = norm(chave)
-        if not c:
-            return ''
-        v = dados_norm.get(c)
-        if v:
-            return v
-        for k, val in dados_norm.items():
-            if (c and c in k) or (k and k in c):
-                return val
-        ctk = set(c.split())
-        for tk, val in dados_tokens:
-            if ctk and ctk.issubset(tk) and val:
-                return val
-        return ''
+    def coringa(match):
+        valor = buscar_coringa(_normalizar_coringa(match.group(1)), mapa)
+        return str(valor) if valor is not None and str(valor).strip() else ''
 
     partes = re.split(r'\s+-\s+', template)
     saida = []
     for parte in partes:
-        rend = re.sub(r'\{\{\s*(.*?)\s*\}\}', lambda m: valor(m.group(1)), parte)
+        rend = re.sub(r'\{\{\s*(.*?)\s*\}\}', coringa, parte)
         rend = re.sub(r'\s+', ' ', rend).strip()
         if rend:
             saida.append(rend)
@@ -1277,8 +1263,13 @@ def gerar_processo_no_sei(page, cfg, cod=''):
     esperado_nivel = NIVEIS_ACESSO.get(nivel, NIVEIS_ACESSO['1'])[0]
     _selecionar_nivel_acesso(frame_form, nivel, cod)
 
-    # PASSO 6b: Hipotese legal (aparece apos a troca de nivel de acesso)
-    _selecionar_hipotese_legal(page, hipotese, cod)
+    # PASSO 6b: Hipotese legal (aparece apos a troca de nivel de acesso).
+    # So roda quando o nivel de acesso NAO e publico: o SEI nao exibe o
+    # select de Hipotese Legal para nivel publico.
+    nivel_publico = esperado_nivel == 'optPublico'
+    hipotese_reval = '' if nivel_publico else hipotese
+    if not nivel_publico:
+        _selecionar_hipotese_legal(page, hipotese, cod)
 
     campos = [
         (['#txtDescricao', 'input[id="txtDescricao"]', '#txtEspecificacao',
@@ -1292,7 +1283,7 @@ def gerar_processo_no_sei(page, cfg, cod=''):
     ]
 
     # PASSO 6c: Revalidar campos (troca de nivel pode recarregar o formulario)
-    ok6c, frame_form = _revalidar_formulario(page, frame_form, campos, hipotese, cod)
+    ok6c, frame_form = _revalidar_formulario(page, frame_form, campos, hipotese_reval, cod)
     if not ok6c:
         return (False, 'PASSO 6c: Campo Especificacao nao encontrado apos nivel/hipotese legal')
 
@@ -1302,7 +1293,7 @@ def gerar_processo_no_sei(page, cfg, cod=''):
         _glog(cod, 6, f"AVISO: Nivel de acesso era {atual_nivel or '(nenhum)'}; "
                       f"reselecionando {esperado_nivel}...")
         _selecionar_nivel_acesso(frame_form, nivel, cod)
-        ok6d, frame_form = _revalidar_formulario(page, frame_form, campos, hipotese, cod)
+        ok6d, frame_form = _revalidar_formulario(page, frame_form, campos, hipotese_reval, cod)
         if not ok6d:
             return (False, 'PASSO 6d: Campo perdido apos reselecao do nivel de acesso')
         atual_nivel = _nivel_atual(frame_form)
@@ -1416,7 +1407,7 @@ def run_gerar():
 
         db = get_db()
         rows = db.execute(
-            "SELECT * FROM processos_gerados WHERE status IN (0, -1) ORDER BY id"
+            "SELECT * FROM processos_sei WHERE status IN (0, -1) ORDER BY id"
         ).fetchall()
         db.close()
 
@@ -1447,18 +1438,10 @@ def run_gerar():
                 gerar_state["atual"] = f"{cod} - {nome}"
                 _glog(cod, 0, f'Processando: {cod} - {nome}')
 
-                dados = {}
-                try:
-                    dados = json.loads(reg.get('dados_csv') or '{}')
-                except Exception:
-                    dados = {}
-                if not isinstance(dados, dict):
-                    dados = {}
-
                 cfg_linha = dict(cfg)
-                cfg_linha['especificacao'] = renderizar_template(cfg.get('especificacao'), dados)
-                cfg_linha['interessados'] = renderizar_template(cfg.get('interessados'), dados)
-                cfg_linha['observacoes'] = renderizar_template(cfg.get('observacoes'), dados)
+                cfg_linha['especificacao'] = renderizar_template(cfg.get('especificacao'), reg)
+                cfg_linha['interessados'] = renderizar_template(cfg.get('interessados'), reg)
+                cfg_linha['observacoes'] = renderizar_template(cfg.get('observacoes'), reg)
                 _glog(cod, 0, f"Espec: {cfg_linha['especificacao']!r} | "
                               f"Interessados: {cfg_linha['interessados']!r} | "
                               f"Nivel: {cfg_linha.get('nivel_acesso') or '1'} | "
@@ -1482,7 +1465,7 @@ def run_gerar():
                 db = get_db()
                 if ok:
                     db.execute(
-                        "UPDATE processos_gerados SET processo_gerado = ?, status = 1, "
+                        "UPDATE processos_sei SET processo_sei = ?, status = 1, "
                         "erro = NULL, data_geracao = ? WHERE id = ?",
                         (detalhe, time.strftime('%Y-%m-%d %H:%M:%S'), reg['id'])
                     )
@@ -1491,7 +1474,7 @@ def run_gerar():
                     _glog(cod, 99, f'SUCESSO: {detalhe}')
                 else:
                     db.execute(
-                        "UPDATE processos_gerados SET status = -1, erro = ? WHERE id = ?",
+                        "UPDATE processos_sei SET status = -1, erro = ? WHERE id = ?",
                         (detalhe, reg['id'])
                     )
                     gerar_state["falha"] += 1
@@ -1530,6 +1513,47 @@ def run_gerar():
 def _fila_ocupada():
     return bool(sei_state.get("rodando") or gerar_state.get("rodando")
                 or baixar_state.get("rodando"))
+
+
+_SQL_PENDENCIAS_ANEXAR = """
+    SELECT a.id, a.cod_sipra, a.pdf_anexo, a.nome_arvore, a.anexado, a.data_anexo,
+           pg.nome, pg.processo_sei, pg.dados_csv
+      FROM anexos_sei a
+      LEFT JOIN processos_sei pg ON pg.cod_beneficiario = a.cod_sipra
+     WHERE a.anexado IN (0, -1)
+       AND a.pdf_anexo IS NOT NULL AND TRIM(a.pdf_anexo) != ''
+       AND TRIM(COALESCE(pg.processo_sei, '')) != ''
+"""
+
+
+def pendencias_anexar():
+    db = get_db()
+    rows = db.execute(_SQL_PENDENCIAS_ANEXAR).fetchall()
+    db.close()
+    return rows
+
+
+def diagnostico_pendencias():
+    db = get_db()
+    total = db.execute(
+        "SELECT COUNT(*) FROM anexos_sei WHERE anexado IN (0, -1)"
+    ).fetchone()[0]
+    com_pdf = db.execute(
+        "SELECT COUNT(*) FROM anexos_sei WHERE anexado IN (0, -1) "
+        "AND pdf_anexo IS NOT NULL AND TRIM(pdf_anexo) != ''"
+    ).fetchone()[0]
+    db.close()
+
+    prontos = len(pendencias_anexar())
+    partes = []
+    if com_pdf - prontos > 0:
+        partes.append(f'{com_pdf - prontos} sem numero de processo '
+                      f'(gere o NUP na aba Gerar)')
+    if total - com_pdf > 0:
+        partes.append(f'{total - com_pdf} sem PDF (carregue os PDFs na aba Anexar)')
+    if not partes:
+        return 'Nenhum registro pendente para anexar'
+    return 'Nenhum registro pronto para anexar: ' + ' | '.join(partes)
 
 
 def _glog_ka(msg):
@@ -1638,31 +1662,120 @@ def keepalive_uma_vez():
         return {'ok': False, 'motivo': str(e)}
 
 
+def keepalive_pgt_uma_vez():
+    """Recarrega a ABA do PGT ja aberta no Chrome debug (mantem sessao ativa).
+
+    - Identifica a aba do PGT e recarrega; se nenhuma existir, abre uma unica
+      vez (sera reutilizada nas proximas).
+    - So recarrega quando o app esta ocioso (nenhuma fila em processamento).
+    """
+    if not keepalive_pgt_state['ativo']:
+        return {'ok': False, 'motivo': 'desativado'}
+    if _fila_ocupada():
+        keepalive_pgt_state['ultimo_erro'] = 'Pausado: fila em processamento'
+        log_msg('KEEPALIVE PGT: pausado (fila em processamento)')
+        return {'ok': False, 'motivo': 'ocupado'}
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            page, idx = _achar_aba_pgt(browser)
+            aberta = page is not None
+            if aberta:
+                _glog_ka(f'PGT: reutilizando aba #{idx} com a URL do PGT')
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                page.reload(wait_until="domcontentloaded", timeout=45000)
+            else:
+                _glog_ka('PGT: nenhuma aba do PGT aberta: criando uma unica vez')
+                page = browser.contexts[0].new_page()
+                page.goto(PGT_URL, wait_until="domcontentloaded", timeout=45000)
+            time.sleep(3)
+            url = page.url or ''
+            browser.close()
+
+        keepalive_pgt_state['ultimo_url'] = url
+        keepalive_pgt_state['ultima_recarga'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        keepalive_pgt_state['recargas'] += 1
+        url_l = (url or '').lower()
+        fora_do_pgt = ('pgt.incra.gov.br' not in url_l
+                       or 'login' in url_l
+                       or 'acesso-nao-autorizado' in url_l
+                       or 'sessao-expirada' in url_l)
+        if fora_do_pgt:
+            keepalive_pgt_state['ultimo_erro'] = 'Sessao expirada ou acesso nao autorizado'
+            log_msg('KEEPALIVE PGT: AVISO - fora da pagina do PGT '
+                    f'({url}); refazer login manualmente')
+        else:
+            keepalive_pgt_state['ultimo_erro'] = None
+            log_msg(f'KEEPALIVE PGT: aba recarregada ({"existente" if aberta else "nova"}): {url}')
+        return {'ok': True, 'url': url}
+    except Exception as e:
+        keepalive_pgt_state['ultimo_erro'] = str(e)
+        log_msg(f'KEEPALIVE PGT: erro ao recarregar PGT: {e}')
+        if 'ECONNREFUSED' in str(e) or 'connect' in str(e).lower():
+            log_msg('KEEPALIVE PGT: porta do Chrome fechada; tentando iniciar o Chrome debug...')
+            try:
+                from app import verificar_chrome_debug
+                threading.Thread(target=verificar_chrome_debug, daemon=True).start()
+            except Exception as e2:
+                log_msg(f'KEEPALIVE PGT: nao foi possivel iniciar o Chrome debug: {e2}')
+        return {'ok': False, 'motivo': str(e)}
+
+
+def keepalive_uma_vez_alvo(alvo='sei'):
+    """Roda uma recarga manual do alvo ('sei'/'pgt') e rearma o intervalo."""
+    alvo = alvo if alvo in KEEPALIVE_ESTADOS else 'sei'
+    funcao = keepalive_uma_vez if alvo == 'sei' else keepalive_pgt_uma_vez
+    resultado = funcao()
+    _keepalive_ultimo_tick[alvo] = time.time()
+    return resultado
+
+
 def keepalive_loop():
-    log_msg(f'KEEPALIVE: thread iniciada (intervalo {keepalive_state["intervalo"]}s)')
+    """Thread unica: recarrega SEI e/ou PGT conforme o intervalo de cada um."""
+    log_msg(f'KEEPALIVE: thread iniciada (SEI a cada {keepalive_state["intervalo"]}s, '
+            f'PGT a cada {keepalive_pgt_state["intervalo"]}s)')
+    for alvo in _keepalive_ultimo_tick:
+        _keepalive_ultimo_tick[alvo] = time.time()
     while True:
-        time.sleep(int(keepalive_state.get('intervalo') or 60))
-        try:
-            keepalive_uma_vez()
-        except Exception as e:
-            keepalive_state['ultimo_erro'] = str(e)
-            log_msg(f'KEEPALIVE: erro no loop: {e}')
+        time.sleep(5)
+        agora = time.time()
+        for alvo, state, funcao in (('sei', keepalive_state, keepalive_uma_vez),
+                                    ('pgt', keepalive_pgt_state, keepalive_pgt_uma_vez)):
+            if not state.get('ativo'):
+                continue
+            intervalo = max(15, int(state.get('intervalo') or 60))
+            if agora - _keepalive_ultimo_tick[alvo] < intervalo:
+                continue
+            _keepalive_ultimo_tick[alvo] = agora
+            try:
+                funcao()
+            except Exception as e:
+                state['ultimo_erro'] = str(e)
+                log_msg(f'KEEPALIVE {alvo.upper()}: erro no loop: {e}')
 
 
-def iniciar_keepalive(ativo=None, intervalo=None):
-    """Inicia a thread de keep-alive (idempotente).
+def iniciar_keepalive(ativo=None, intervalo=None, alvo='sei'):
+    """Sincroniza o keep-alive de um alvo ('sei'/'pgt') e garante a thread.
 
     ativo=None mantem o valor atual, para nunca sobrescrever a escolha
     do usuario de deixar o keep-alive desativado.
     """
+    state = KEEPALIVE_ESTADOS.get(alvo) or keepalive_state
+    alvo = alvo if alvo in KEEPALIVE_ESTADOS else 'sei'
     if ativo is not None:
-        keepalive_state['ativo'] = bool(ativo)
+        state['ativo'] = bool(ativo)
     if intervalo:
-        keepalive_state['intervalo'] = int(intervalo) or 60
+        state['intervalo'] = int(intervalo) or 60
     if keepalive_state.get('thread_ativa'):
-        log_msg('KEEPALIVE: thread ja estava ativa')
+        log_msg(f'KEEPALIVE: {alvo.upper()} '
+                f'{"ativado" if state["ativo"] else "desativado"} '
+                f'(a cada {state["intervalo"]}s); thread ja ativa')
         return
     keepalive_state['thread_ativa'] = True
+    keepalive_pgt_state['thread_ativa'] = True
     t = threading.Thread(target=keepalive_loop, daemon=True)
     t.start()
 
@@ -1944,7 +2057,7 @@ def run_baixar():
 
         db = get_db()
         rows = db.execute(
-            "SELECT * FROM processos_gerados "
+            "SELECT * FROM processos_sei "
             "WHERE COALESCE(download, 0) <> 1 ORDER BY id"
         ).fetchall()
         db.close()
@@ -2039,7 +2152,7 @@ def run_baixar():
                 agora = time.strftime('%Y-%m-%d %H:%M:%S')
                 if ok:
                     db.execute(
-                        "UPDATE processos_gerados SET download = 1, erro_download = NULL, "
+                        "UPDATE processos_sei SET download = 1, erro_download = NULL, "
                         "arquivo_download = ?, data_download = ? WHERE id = ?",
                         (detalhe, agora, reg['id'])
                     )
@@ -2048,7 +2161,7 @@ def run_baixar():
                     _blog(cod, 99, f'SUCESSO: {detalhe}')
                 else:
                     db.execute(
-                        "UPDATE processos_gerados SET download = -1, erro_download = ?, "
+                        "UPDATE processos_sei SET download = -1, erro_download = ?, "
                         "data_download = ? WHERE id = ?",
                         (detalhe, agora, reg['id'])
                     )
@@ -2084,7 +2197,7 @@ def run_baixar():
             try:
                 db = get_db()
                 db.execute(
-                    "UPDATE processos_gerados SET download = 0, erro_download = NULL, "
+                    "UPDATE processos_sei SET download = 0, erro_download = NULL, "
                     "arquivo_download = NULL, data_download = NULL "
                     "WHERE download IS NOT NULL AND download <> 0"
                 )
@@ -2128,29 +2241,10 @@ def run_sei():
     try:
         config = carregar_config()
 
-        db = get_db()
-        rows = db.execute(
-            """
-            SELECT a.id, a.cod_sipra, a.nome, a.processo_sei, a.pdf_anexo, a.nome_arvore,
-                   (SELECT TRIM(g.processo_gerado) FROM processos_gerados g
-                     WHERE UPPER(TRIM(g.cod_beneficiario)) = UPPER(TRIM(a.cod_sipra))
-                       AND g.processo_gerado IS NOT NULL
-                       AND TRIM(g.processo_gerado) != ''
-                     ORDER BY g.id DESC LIMIT 1) AS processo_gerado
-              FROM anexos_sei a
-             WHERE a.anexado IN (0, -1)
-               AND a.pdf_anexo IS NOT NULL AND TRIM(a.pdf_anexo) != ''
-               AND COALESCE(NULLIF(TRIM(a.processo_sei), ''), '',
-                   (SELECT TRIM(g.processo_gerado) FROM processos_gerados g
-                     WHERE UPPER(TRIM(g.cod_beneficiario)) = UPPER(TRIM(a.cod_sipra))
-                       AND g.processo_gerado IS NOT NULL
-                       AND TRIM(g.processo_gerado) != ''
-                     ORDER BY g.id DESC LIMIT 1), '') != ''
-            """
-        ).fetchall()
-        db.close()
+        rows = pendencias_anexar()
 
         if not rows:
+            status_final = 'sem_pendencias'
             _registrar_status("Nenhum registro pendente ou com erro para anexar")
             log_msg("SEI: Nenhum registro pendente ou com erro para anexar.")
             return
@@ -2176,9 +2270,8 @@ def run_sei():
                 reg = dict(row)
                 cod_sipra = reg['cod_sipra']
                 nome = reg['nome'] or ''
-                # processo do CSV ou, na falta, o NUP gerado na aba Gerar
-                processo_sei = (reg.get('processo_sei') or '').strip() \
-                    or (reg.get('processo_gerado') or '').strip()
+                # NUP do processo pai (processos_sei.processo_sei)
+                processo_sei = (reg.get('processo_sei') or '').strip()
                 pdf_nome = reg['pdf_anexo']
                 caminho_pdf = os.path.join(UPLOADS_DIR, pdf_nome)
 
@@ -2193,7 +2286,8 @@ def run_sei():
                     sei_state["falha"] += 1
                     sei_state["erros"].append({"cod_sipra": cod_sipra, "nome": nome, "erro": msg})
                     db = get_db()
-                    db.execute("UPDATE anexos_sei SET anexado = -1 WHERE id = ?", (reg['id'],))
+                    db.execute("UPDATE anexos_sei SET anexado = -1, data_anexo = NULL "
+                               "WHERE id = ?", (reg['id'],))
                     db.commit()
                     db.close()
                     continue
@@ -2221,7 +2315,11 @@ def run_sei():
 
                 if sucesso:
                     db = get_db()
-                    db.execute("UPDATE anexos_sei SET anexado = 1 WHERE id = ?", (reg['id'],))
+                    db.execute(
+                        "UPDATE anexos_sei SET anexado = 1, data_anexo = ? "
+                        "WHERE id = ?",
+                        (time.strftime('%Y-%m-%d %H:%M:%S'), reg['id'])
+                    )
                     db.commit()
                     db.close()
                     sei_state["sucesso"] += 1
@@ -2234,7 +2332,8 @@ def run_sei():
                     sei_state["erros"].append({"cod_sipra": cod_sipra, "nome": nome, "erro": erro_detalhe})
                     sei_state["falha_lista"].append({"cod_sipra": cod_sipra, "erro": erro_detalhe})
                     db = get_db()
-                    db.execute("UPDATE anexos_sei SET anexado = -1 WHERE id = ?", (reg['id'],))
+                    db.execute("UPDATE anexos_sei SET anexado = -1, data_anexo = NULL "
+                               "WHERE id = ?", (reg['id'],))
                     db.commit()
                     db.close()
                     _registrar_status(f"FALHA: {cod_sipra} - {nome} | {erro_detalhe}")

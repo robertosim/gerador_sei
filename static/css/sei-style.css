@@ -904,11 +904,18 @@ td.editavel:hover::after {
   margin: 0 auto;
   padding: 10px 20px 24px;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: var(--sei-gray);
+}
+
+.ka-linha {
+  display: flex;
   gap: 14px;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 13px;
-  color: var(--sei-gray);
 }
 
 .rodape .btn { padding: 6px 12px; font-size: 12px; }

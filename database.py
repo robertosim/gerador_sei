@@ -2,14 +2,29 @@ import logging
 import re
 import sqlite3
 import os
+import sys
+import json
 
 from tipos_processo import TIPOS_PROCESSO
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'processos_sei.db')
+
+def dir_base():
+    """Pasta onde ficam os dados do app.
+
+    Executavel (.exe): a pasta do proprio executavel. Codigo-fonte: a pasta
+    do projeto. Assim banco, logs, uploads e CSVs ficam sempre ao lado do
+    que o usuario roda, mesmo dentro do .exe unico (que extrai em temp).
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = dir_base()
+DB_PATH = os.path.join(BASE_DIR, 'processos_sei.db')
 
 DEFAULT_CONFIG = {
     'serie': '82',
-    'sigilo': 'R',
     'nome_arvore': 'CCIR',
     'hipotese': '4',
     'nivel': '1'
@@ -19,6 +34,7 @@ DEFAULT_CONFIG = {
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
     return conn
 
 
@@ -175,21 +191,160 @@ HIPOTESE_LEGAL = [
 ]
 
 
-def init_db():
-    conn = get_db()
-    conn.execute('''CREATE TABLE IF NOT EXISTS anexos_sei (
+# ---------------------------------------------------------------------------
+# Esquema novo:
+#   processos_sei  (antes processos_gerados) - 1 registro por beneficiario;
+#                 `processo_gerado` passou a se chamar `processo_sei` (NUP) e
+#                 `processo_sei_original` (NUP do CSV) foi descartada.
+#   anexos_sei     - N anexos por processo; `nome` e `processo_sei` foram
+#                 removidos (hoje vem do processo pai) e a FK
+#                 cod_sipra -> processos_sei.cod_beneficiario garante a
+#                 relacao 1:N.
+# ---------------------------------------------------------------------------
+
+DDL_PROCESSOS_SEI = '''CREATE TABLE IF NOT EXISTS processos_sei (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cod_beneficiario TEXT NOT NULL,
+    nome TEXT,
+    dados_csv TEXT,
+    processo_sei TEXT,
+    status INTEGER DEFAULT 0,
+    erro TEXT,
+    data_geracao TEXT,
+    download INTEGER DEFAULT 0,
+    erro_download TEXT,
+    arquivo_download TEXT,
+    data_download TEXT
+)'''
+
+DDL_ANEXOS_SEI = '''CREATE TABLE IF NOT EXISTS anexos_sei (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cod_sipra TEXT NOT NULL,
+    pdf_anexo TEXT,
+    anexado INTEGER DEFAULT 0,
+    tipo_documento INTEGER,
+    nome_arvore TEXT,
+    nivel_acesso INTEGER DEFAULT 1,
+    hipotese_legal INTEGER,
+    data_anexo TEXT,
+    FOREIGN KEY (cod_sipra) REFERENCES processos_sei(cod_beneficiario)
+)'''
+
+COLUNAS_DOWNLOAD = ('download INTEGER DEFAULT 0', 'erro_download TEXT',
+                    'arquivo_download TEXT', 'data_download TEXT')
+
+
+def _existe_tabela(conn, nome):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        (nome,)).fetchone() is not None
+
+
+def _colunas_tabela(conn, tabela):
+    return [r[1] for r in conn.execute(f'PRAGMA table_info({tabela})')]
+
+
+def _fk_anexos_presente(conn):
+    try:
+        linhas = conn.execute('PRAGMA foreign_key_list(anexos_sei)').fetchall()
+    except sqlite3.Error:
+        return False
+    return any(l[2] == 'processos_sei' and l[3] == 'cod_sipra' and l[4] == 'cod_beneficiario'
+               for l in linhas)
+
+
+def _migrar_processos(conn):
+    """processos_gerados -> processos_sei (processo_gerado -> processo_sei)."""
+    if not _existe_tabela(conn, 'processos_gerados'):
+        return
+    cols = _colunas_tabela(conn, 'processos_gerados')
+    # Colunas de download criadas por versoes antigas: garante antes de copiar.
+    for ddl in COLUNAS_DOWNLOAD:
+        nome_col = ddl.split()[0]
+        if nome_col not in cols:
+            try:
+                conn.execute(f'ALTER TABLE processos_gerados ADD COLUMN {ddl}')
+                cols.append(nome_col)
+            except sqlite3.Error:
+                pass
+    if not _existe_tabela(conn, 'processos_sei'):
+        conn.execute(DDL_PROCESSOS_SEI)
+    alvo = _colunas_tabela(conn, 'processos_sei')
+    pares = [(c, c) for c in cols if c in alvo]
+    if 'processo_gerado' in cols and 'processo_sei' in alvo:
+        pares.append(('processo_gerado', 'processo_sei'))
+    vazio = conn.execute('SELECT COUNT(*) FROM processos_sei').fetchone()[0] == 0
+    if pares and vazio:
+        conn.execute(
+            f"INSERT INTO processos_sei ({', '.join(d for _, d in pares)}) "
+            f"SELECT {', '.join(o for o, _ in pares)} FROM processos_gerados")
+    conn.execute('DROP TABLE processos_gerados')
+    log_msg(f'MIGRACAO: processos_gerados -> processos_sei '
+            f'({len(pares)} coluna(s) copiada(s))')
+
+
+def _migrar_anexos(conn):
+    """Recria anexos_sei sem nome/processo_sei e com a FK para processos_sei."""
+    if not _existe_tabela(conn, 'anexos_sei'):
+        return
+    cols = _colunas_tabela(conn, 'anexos_sei')
+    precisa = 'nome' in cols or 'processo_sei' in cols or not _fk_anexos_presente(conn)
+    if not precisa:
+        return
+
+    # Codigos sem processo pai: a linha antiga ja trazia nome/NUP, entao cria
+    # o pai a partir dela (status NULL = fora da fila de geracao).
+    nome_sql = 'a.nome' if 'nome' in cols else 'NULL'
+    nup_sql = 'a.processo_sei' if 'processo_sei' in cols else 'NULL'
+    conn.execute(f'''
+        INSERT INTO processos_sei (cod_beneficiario, nome, processo_sei, status)
+        SELECT a.cod_sipra,
+               MAX(CASE WHEN TRIM(COALESCE({nome_sql}, '')) <> '' THEN {nome_sql} END),
+               MAX(CASE WHEN TRIM(COALESCE({nup_sql}, '')) <> '' THEN {nup_sql} END),
+               NULL
+          FROM anexos_sei a
+         WHERE TRIM(COALESCE(a.cod_sipra, '')) <> ''
+           AND NOT EXISTS (SELECT 1 FROM processos_sei p
+                            WHERE p.cod_beneficiario = a.cod_sipra)
+         GROUP BY a.cod_sipra''')
+
+    conn.execute('DROP TABLE IF EXISTS anexos_sei_novo')
+    conn.execute('''CREATE TABLE anexos_sei_novo (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cod_sipra TEXT NOT NULL,
-        nome TEXT,
-        processo_sei TEXT,
         pdf_anexo TEXT,
         anexado INTEGER DEFAULT 0,
         tipo_documento INTEGER,
         nome_arvore TEXT,
         nivel_acesso INTEGER DEFAULT 1,
         hipotese_legal INTEGER,
-        data_anexo TEXT
+        data_anexo TEXT,
+        FOREIGN KEY (cod_sipra) REFERENCES processos_sei(cod_beneficiario)
     )''')
+    mantidas = [c for c in cols if c not in ('nome', 'processo_sei')]
+    conn.execute(f"INSERT INTO anexos_sei_novo ({', '.join(mantidas)}) "
+                 f"SELECT {', '.join(mantidas)} FROM anexos_sei")
+    conn.execute('DROP TABLE anexos_sei')
+    conn.execute('ALTER TABLE anexos_sei_novo RENAME TO anexos_sei')
+    removidas = [c for c in cols if c not in mantidas]
+    log_msg(f'MIGRACAO: anexos_sei recriado com FK '
+            f'(removidas: {", ".join(removidas) or "nenhuma"})')
+
+
+def init_db():
+    conn = get_db()
+    # A recriacao das tabelas desliga/religa FKs; a pragma nao vale dentro de
+    # transacao, entao desliga antes de qualquer DML e nao volta a ligar aqui
+    # (cada nova conexao, via get_db, ja liga).
+    conn.execute('PRAGMA foreign_keys = OFF')
+    _migrar_processos(conn)
+    conn.execute(DDL_PROCESSOS_SEI)
+    _migrar_anexos(conn)
+    conn.execute(DDL_ANEXOS_SEI)
+    try:
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS ux_processos_sei_cod '
+                     'ON processos_sei(cod_beneficiario)')
+    except sqlite3.IntegrityError as e:
+        log_msg(f'AVISO: indice unico em processos_sei.cod_beneficiario nao criado ({e})')
     conn.execute('''CREATE TABLE IF NOT EXISTS tipo_documento (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         codigo INTEGER NOT NULL UNIQUE,
@@ -212,28 +367,6 @@ def init_db():
         hipotese TEXT DEFAULT '4',
         nivel TEXT DEFAULT '1'
     )''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS processos_gerados (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        cod_beneficiario TEXT NOT NULL,
-        nome TEXT,
-        processo_sei_original TEXT,
-        dados_csv TEXT,
-        processo_gerado TEXT,
-        status INTEGER DEFAULT 0,
-        erro TEXT,
-        data_geracao TEXT
-    )''')
-    # Estado dos espelhos baixados na aba Baixar (mesmos campos da extensao)
-    for ddl in (
-        "ALTER TABLE processos_gerados ADD COLUMN download INTEGER DEFAULT 0",
-        "ALTER TABLE processos_gerados ADD COLUMN erro_download TEXT",
-        "ALTER TABLE processos_gerados ADD COLUMN arquivo_download TEXT",
-        "ALTER TABLE processos_gerados ADD COLUMN data_download TEXT",
-    ):
-        try:
-            conn.execute(ddl)
-        except Exception:
-            pass
     conn.execute('''CREATE TABLE IF NOT EXISTS config_geracao (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tipo_processo TEXT DEFAULT '',
@@ -269,8 +402,82 @@ def init_db():
     if conn.execute('SELECT COUNT(*) FROM tipo_processo').fetchone()[0] == 0:
         conn.executemany('INSERT OR IGNORE INTO tipo_processo (codigo, nome, sigiloso) VALUES (?, ?, ?)',
                          TIPOS_PROCESSO)
+    _criar_config_keepalive(conn)
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Keep-alive (SEI e PGT): preferencia gravada NO BANCO (substitui o
+# keepalive.json, que era migrado na primeira execucao e depois apagado)
+# ---------------------------------------------------------------------------
+
+KEEPALIVE_ALVOS = ('sei', 'pgt')
+KEEPALIVE_PADRAO = {'ativo': True, 'intervalo': 60}
+
+
+def _criar_config_keepalive(conn):
+    """Cria a tabela de keep-alive e migra o keepalive.json antigo, se existir."""
+    conn.execute('''CREATE TABLE IF NOT EXISTS config_keepalive (
+        alvo TEXT PRIMARY KEY,
+        ativo INTEGER NOT NULL DEFAULT 1,
+        intervalo INTEGER NOT NULL DEFAULT 60
+    )''')
+    if conn.execute('SELECT COUNT(*) FROM config_keepalive').fetchone()[0] > 0:
+        return
+    ativo, intervalo, origem = 1, 60, 'padrao'
+    caminho = os.path.join(dir_base(), 'keepalive.json')
+    if os.path.exists(caminho):
+        try:
+            with open(caminho, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            ativo = 1 if d.get('ativo', True) else 0
+            intervalo = int(d.get('intervalo', 60) or 60)
+            origem = 'keepalive.json (migrado e apagado)'
+            os.remove(caminho)
+        except Exception as e:
+            origem = f'padrao (keepalive.json ilegivel: {e})'
+    conn.executemany('INSERT INTO config_keepalive (alvo, ativo, intervalo) VALUES (?, ?, ?)',
+                     [(alvo, ativo, intervalo) for alvo in KEEPALIVE_ALVOS])
+    log_msg(f'KEEPALIVE: preferencia gravada no banco a partir do {origem} '
+            f'(ativo={bool(ativo)}, intervalo={intervalo}s)')
+
+
+def ler_keepalive(alvo='sei'):
+    """Le a preferencia de keep-alive (ativo/intervalo) do banco."""
+    if alvo not in KEEPALIVE_ALVOS:
+        alvo = 'sei'
+    try:
+        conn = get_db()
+        row = conn.execute('SELECT ativo, intervalo FROM config_keepalive WHERE alvo = ?',
+                           (alvo,)).fetchone()
+        conn.close()
+        if row:
+            return {'ativo': bool(row['ativo']), 'intervalo': int(row['intervalo'] or 60)}
+    except Exception as e:
+        log_msg(f'KEEPALIVE: erro ao ler config do banco: {e}')
+    return dict(KEEPALIVE_PADRAO)
+
+
+def salvar_keepalive(alvo='sei', ativo=None, intervalo=None):
+    """Grava a preferencia de keep-alive no banco. Retorna a config final."""
+    if alvo not in KEEPALIVE_ALVOS:
+        alvo = 'sei'
+    cfg = ler_keepalive(alvo)
+    if ativo is not None:
+        cfg['ativo'] = bool(ativo)
+    if intervalo:
+        cfg['intervalo'] = max(15, int(intervalo))
+    try:
+        conn = get_db()
+        conn.execute('INSERT OR REPLACE INTO config_keepalive (alvo, ativo, intervalo) VALUES (?, ?, ?)',
+                     (alvo, 1 if cfg['ativo'] else 0, cfg['intervalo']))
+        conn.commit()
+        conn.close()
+        return cfg
+    except Exception as e:
+        log_msg(f'KEEPALIVE: erro ao gravar config no banco: {e}')
+        return None
 
 
 DEFAULT_CONFIG_GERACAO = {
@@ -284,9 +491,14 @@ DEFAULT_CONFIG_GERACAO = {
 
 
 def log_msg(msg):
-    """Registra no log do app quando ha handlers; caso contrario imprime."""
+    """Registra no log do app quando ha handlers; caso contrario imprime.
+
+    Os handlers ficam no logger RAIZ (logging.basicConfig), entao checar
+    apenas o logger 'anexador' escondia as mensagens do SEI/gerar/baixar
+    do arquivo de log (no .exe elas iam so para o console).
+    """
     lg = logging.getLogger('anexador')
-    if lg.handlers:
+    if lg.handlers or logging.getLogger().handlers:
         lg.info(msg)
     else:
         print(msg)
@@ -302,11 +514,152 @@ def _normalizar_coringa(s):
     return s
 
 
-def processar_nome_arvore_template(template_str, registro=None):
+def _tem_valor(v):
+    return v is not None and str(v).strip() != ''
+
+
+# Apelidos amigaveis: chave normalizada -> campos (primeiro com valor vence).
+# Cobre as duas tabelas: cod_sipra (aba Anexar) e cod_beneficiario (aba Gerar).
+ALIASES_CORINGA = {
+    'codigo sipra': ('cod_sipra', 'cod_beneficiario'),
+    'cod sipra': ('cod_sipra', 'cod_beneficiario'),
+    'codsipra': ('cod_sipra', 'cod_beneficiario'),
+    'codigo beneficiario': ('cod_sipra', 'cod_beneficiario'),
+    'codigo do beneficiario': ('cod_sipra', 'cod_beneficiario'),
+    'cod beneficiario': ('cod_sipra', 'cod_beneficiario'),
+    'nome titular 1': ('nome',),
+    'nome titular': ('nome',),
+    'nome beneficiario': ('nome',),
+    'nome': ('nome',),
+    'beneficiario': ('nome',),
+    'titular': ('nome',),
+    'titular 1': ('nome',),
+    'n processo sei': ('processo_sei',),
+    'no processo sei': ('processo_sei',),
+    'numero processo sei': ('processo_sei',),
+    'processo sei': ('processo_sei',),
+    'processo': ('processo_sei',),
+    'nup': ('processo_sei',),
+    'nup processo': ('processo_sei',),
+    'processo_sei': ('processo_sei',),
+    'pdf anexo': ('pdf_anexo',),
+    'pdf': ('pdf_anexo',),
+    'arquivo': ('pdf_anexo',),
+    'pdf_anexo': ('pdf_anexo',),
+    'tipo documento': ('tipo_documento_nome', 'tipo_documento'),
+    'tipo do documento': ('tipo_documento_nome', 'tipo_documento'),
+    'tipo': ('tipo_documento_nome', 'tipo_documento'),
+    'serie': ('tipo_documento', 'tipo_documento_nome'),
+    'tipo_documento': ('tipo_documento',),
+    'tipo_documento_nome': ('tipo_documento_nome',),
+    'hipotese legal': ('hipotese_legal_nome', 'hipotese_legal'),
+    'hipotese': ('hipotese_legal_nome', 'hipotese_legal'),
+    'hipotese_legal': ('hipotese_legal',),
+    'hipotese_legal_nome': ('hipotese_legal_nome',),
+    'nivel acesso': ('nivel_acesso',),
+    'nivel de acesso': ('nivel_acesso',),
+    'nivel': ('nivel_acesso',),
+    'nivel_acesso': ('nivel_acesso',),
+    'data anexo': ('data_anexo',),
+    'data_anexo': ('data_anexo',),
+    'data geracao': ('data_geracao',),
+    'data download': ('data_download',),
+}
+
+
+def fonte_coringas(registro=None, dados_csv=None):
+    """Monta {chave normalizada: valor} para resolver os coringas {{...}}.
+
+    Tres fontes, nesta ordem de precedencia:
+      1. colunas da propria tabela do registro (cod_sipra/cod_beneficiario,
+         nome, processo_sei, pdf_anexo, ...);
+      2. colunas do CSV (guardadas na coluna dados_csv como JSON) - so
+         preenchem chaves que a tabela nao tem;
+      3. apelidos amigaveis ({{Código SIPRA}}, {{Nome Titular 1}}, {{NUP}},
+         {{Serie}}, ...).
+
+    Args:
+        registro: dict/sqlite.Row do banco (pode trazer dados_csv), ou
+            string legada contendo apenas o cod_sipra.
+        dados_csv: dict ou JSON das colunas do CSV (opcional; quando nao vem
+            no registro, e lido do proprio registro).
+    """
+    campos = {}
+    if isinstance(registro, str):
+        campos = {'cod_sipra': registro}
+    elif registro is not None:
+        try:
+            campos = dict(registro)
+        except Exception:
+            campos = {'cod_sipra': str(registro)}
+
+    bruto = dados_csv if dados_csv is not None else campos.get('dados_csv')
+    if isinstance(bruto, dict):
+        colunas = bruto
+    elif isinstance(bruto, str) and bruto.strip():
+        try:
+            colunas = json.loads(bruto)
+        except Exception:
+            colunas = {}
+    else:
+        colunas = {}
+    if not isinstance(colunas, dict):
+        colunas = {}
+
+    mapa = {}
+    for chave, valor in campos.items():
+        if chave == 'dados_csv':
+            continue
+        norm = _normalizar_coringa(str(chave))
+        if norm:
+            mapa[norm] = valor
+    for chave, valor in colunas.items():
+        norm = _normalizar_coringa(str(chave))
+        if norm and norm not in mapa:
+            mapa[norm] = valor
+    for apelido, alvos in ALIASES_CORINGA.items():
+        if _tem_valor(mapa.get(apelido)):
+            continue
+        for alvo in alvos:
+            if _tem_valor(campos.get(alvo)):
+                mapa[apelido] = campos[alvo]
+                break
+    return mapa
+
+
+def buscar_coringa(chave_norm, mapa):
+    """Valor nao-vazio da chave normalizada ('' quando nao ha).
+
+    Primeiro a busca exata; se nada casar, a difusa: a chave como trecho do
+    nome da coluna e depois por subconjunto de tokens (regra que a aba Gerar
+    ja usava: "{{Nome Titular}}" acha a coluna "NOME TITULAR 1"). A coluna
+    so vence quando tem valor: coringa com dado vazio cai na proxima fonte.
+    """
+    if not chave_norm:
+        return ''
+    valor = mapa.get(chave_norm)
+    if _tem_valor(valor):
+        return valor
+    for k, v in mapa.items():
+        if _tem_valor(v) and chave_norm in k:
+            return v
+    alvo = set(chave_norm.split())
+    if alvo:
+        for k, v in mapa.items():
+            if _tem_valor(v) and alvo.issubset(set(k.split())):
+                return v
+    return ''
+
+
+def processar_nome_arvore_template(template_str, registro=None, dados_csv=None):
     """Mesla campos coringas {{...}} com valores do registro.
 
-    Exemplo: "TD {{Código SIPRA}} {{Nome Titular 1}}" ->
-             "TD SC0123 JOAO SILVA"
+    Aceita colunas da propria tabela (cod_sipra, nome, processo_sei,
+    pdf_anexo, ...), colunas do CSV (dados_csv) e apelidos
+    ({{Código SIPRA}}, {{Nome Titular 1}}, {{NUP}}, ...).
+
+    Exemplo: "TD {{Código SIPRA}} - Lote {{Lote}}" ->
+             "TD SC0123 - Lote 12"
 
     Coringa sem valor no registro fica visivel no texto (em vez de virar
     string vazia), assim a coluna "Nome na Arvore" nunca some e o problema
@@ -314,82 +667,18 @@ def processar_nome_arvore_template(template_str, registro=None):
 
     Args:
         template_str: texto com zero ou N coringas entre {{ }}.
-        registro: dict/sqlite.Row com os campos do banco, ou string
-            legada contendo apenas o cod_sipra.
+        registro: dict/sqlite.Row com os campos do banco (pode trazer
+            dados_csv), ou string legada contendo apenas o cod_sipra.
+        dados_csv: dict ou JSON das colunas do CSV (opcional).
     """
     if not template_str:
         return template_str
 
-    if registro is None:
-        dados = {}
-    elif isinstance(registro, str):
-        dados = {'cod_sipra': registro}
-    elif isinstance(registro, dict):
-        dados = registro
-    else:
-        try:
-            dados = dict(registro)
-        except Exception:
-            dados = {'cod_sipra': str(registro)}
-
-    def _valor(chave_normalizada):
-        mapa = {
-            'codigo sipra': dados.get('cod_sipra', ''),
-            'cod sipra': dados.get('cod_sipra', ''),
-            'cod_sipra': dados.get('cod_sipra', ''),
-            'codsipra': dados.get('cod_sipra', ''),
-            'codigo beneficiario': dados.get('cod_sipra', ''),
-            'codigo do beneficiario': dados.get('cod_sipra', ''),
-            'cod beneficiario': dados.get('cod_sipra', ''),
-            'nome titular 1': dados.get('nome', ''),
-            'nome titular': dados.get('nome', ''),
-            'nome beneficiario': dados.get('nome', ''),
-            'nome': dados.get('nome', ''),
-            'beneficiario': dados.get('nome', ''),
-            'titular': dados.get('nome', ''),
-            'titular 1': dados.get('nome', ''),
-            'n processo sei': dados.get('processo_sei', ''),
-            'no processo sei': dados.get('processo_sei', ''),
-            'numero processo sei': dados.get('processo_sei', ''),
-            'processo sei': dados.get('processo_sei', ''),
-            'processo': dados.get('processo_sei', ''),
-            'nup': dados.get('processo_sei', ''),
-            'nup processo': dados.get('processo_sei', ''),
-            'processo_sei': dados.get('processo_sei', ''),
-            'pdf anexo': dados.get('pdf_anexo', ''),
-            'pdf': dados.get('pdf_anexo', ''),
-            'arquivo': dados.get('pdf_anexo', ''),
-            'pdf_anexo': dados.get('pdf_anexo', ''),
-            'tipo documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'tipo do documento': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'tipo': dados.get('tipo_documento_nome') or dados.get('tipo_documento', ''),
-            'serie': dados.get('tipo_documento', ''),
-            'tipo_documento': dados.get('tipo_documento', ''),
-            'tipo_documento_nome': dados.get('tipo_documento_nome', ''),
-            'hipotese legal': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
-            'hipotese': dados.get('hipotese_legal_nome') or dados.get('hipotese_legal', ''),
-            'hipotese_legal': dados.get('hipotese_legal', ''),
-            'hipotese_legal_nome': dados.get('hipotese_legal_nome', ''),
-            'nivel acesso': dados.get('nivel_acesso', ''),
-            'nivel de acesso': dados.get('nivel_acesso', ''),
-            'nivel': dados.get('nivel_acesso', ''),
-            'nivel_acesso': dados.get('nivel_acesso', ''),
-            'data anexo': dados.get('data_anexo', ''),
-            'data': dados.get('data_anexo', ''),
-            'data_anexo': dados.get('data_anexo', ''),
-        }
-        if chave_normalizada in mapa:
-            return mapa[chave_normalizada]
-        # tenta acesso direto por nome de coluna
-        if chave_normalizada in dados:
-            return dados.get(chave_normalizada, '')
-        return ''
+    mapa = fonte_coringas(registro, dados_csv)
 
     def _substituir(match):
-        inner = match.group(1).strip()
-        chave = _normalizar_coringa(inner)
-        valor = _valor(chave)
-        if valor is None or str(valor).strip() == '':
+        valor = buscar_coringa(_normalizar_coringa(match.group(1)), mapa)
+        if not _tem_valor(valor):
             # Sem dado no registro: mantem o coringa em vez de apagar.
             return match.group(0)
         return str(valor)

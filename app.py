@@ -16,14 +16,26 @@ from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, request, jsonify, Response
 from werkzeug.exceptions import HTTPException
 from database import (get_db, init_db, DEFAULT_CONFIG, DEFAULT_CONFIG_GERACAO, DB_PATH,
-                      processar_nome_arvore_template)
+                      processar_nome_arvore_template, dir_base,
+                      ler_keepalive, salvar_keepalive)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# No .exe (onefile) __file__ fica na pasta temporaria de extracao: usar
+# dir_base() mantem log, CSV, uploads e keepalive ao lado do executavel.
+BASE_DIR = dir_base()
 LOG_PATH = os.path.join(BASE_DIR, 'processos_sei.log')
 CSV_DIR = os.path.join(BASE_DIR, 'csv')
 CHROME_DEBUG_PORT = 9222
 SERVIDOR_PORTA = 5000
 SERVIDOR_URL = f'http://localhost:{SERVIDOR_PORTA}'
+SEI_URL = 'https://sei.incra.gov.br/sei'
+PGT_URL = 'https://pgt.incra.gov.br/sipra/beneficiario'
+# Abas abertas na subida do app, NESTA ORDEM (dashboard, SEI, PGT).
+# O 3o item e o trecho de URL usado para detectar se a aba ja esta aberta.
+ABAS_INICIAIS = (
+    (SERVIDOR_URL, 'dashboard', 'localhost:5000'),
+    (SEI_URL, 'SEI', 'sei.incra.gov.br'),
+    (PGT_URL, 'PGT', 'pgt.incra.gov.br'),
+)
 KEEPALIVE_INTERVALO = 60
 
 
@@ -35,8 +47,38 @@ def porta_aberta(porta, host='127.0.0.1', timeout=2):
         return False
 
 
+def perfil_chrome_debug():
+    """Pasta --user-data-dir do Chrome debug: absoluta e gravavel.
+
+    Prefere C:\\ChromeDebug (mesmo caminho do abrir_chrome.bat); se a pasta
+    nao puder ser escrita (Program Files / PC de empresa), usa
+    %LOCALAPPDATA%\\GeradorSEI\\ChromeDebug. Um caminho relativo ao drive
+    (ex.: C:ChromeDebug) resolvesse contra o cwd do Chrome e parava dentro
+    de Program Files, onde o Chrome nao sobe.
+    """
+    preferido = (os.environ.get('SystemDrive') or 'C:').rstrip('\\/') + '\\ChromeDebug'
+    alternativo = os.path.join(os.environ.get('LOCALAPPDATA')
+                               or os.path.expanduser('~'), 'GeradorSEI', 'ChromeDebug')
+    for caminho in (preferido, alternativo):
+        try:
+            os.makedirs(caminho, exist_ok=True)
+            teste = os.path.join(caminho, '.escrita')
+            with open(teste, 'w', encoding='utf-8') as fh:
+                fh.write('ok')
+            os.remove(teste)
+            return caminho
+        except OSError:
+            continue
+    return preferido
+
+
 def verificar_chrome_debug():
-    """Garante o Chrome em modo debug; retorna True se a porta 9222 responder."""
+    """Garante o Chrome em modo debug; retorna True se a porta 9222 responder.
+
+    Chamada numa thread propria no startup (nao bloqueia a subida do servidor)
+    e de novo nos endpoints que precisam da automacao. Se a porta nao estiver
+    aberta, sobe o Chrome com --remote-debugging-port e um perfil proprio.
+    """
     if porta_aberta(CHROME_DEBUG_PORT):
         log.info('Chrome ja esta rodando em modo debug na porta %d', CHROME_DEBUG_PORT)
         return True
@@ -56,23 +98,27 @@ def verificar_chrome_debug():
 
         # Perfil separado: sem ele a instancia ja aberta do Chrome absorve o
         # comando e a porta 9222 nunca abre.
-        chrome_profile = os.path.join(os.environ.get('SystemDrive', 'C:'), 'ChromeDebug')
-        subprocess.Popen([
-            chrome_exe,
-            f'--remote-debugging-port={CHROME_DEBUG_PORT}',
-            f'--user-data-dir={chrome_profile}',
+        chrome_profile = perfil_chrome_debug()
+        for tentativa in (1, 2):
+            subprocess.Popen([
+                chrome_exe,
+                f'--remote-debugging-port={CHROME_DEBUG_PORT}',
+                f'--user-data-dir={chrome_profile}',
             '--no-first-run',
             '--no-default-browser-check',
-            'https://sei.incra.gov.br'
+            SEI_URL
         ], cwd=os.path.dirname(chrome_exe))
 
-        for _ in range(20):
-            time.sleep(1)
-            if porta_aberta(CHROME_DEBUG_PORT):
-                log.info('Chrome iniciado com sucesso em modo debug (perfil %s)', chrome_profile)
-                return True
+            for _ in range(20):
+                time.sleep(1)
+                if porta_aberta(CHROME_DEBUG_PORT):
+                    log.info('Chrome iniciado com sucesso em modo debug (perfil %s)', chrome_profile)
+                    return True
 
-        log.warning('Chrome iniciado mas porta %d nao respondeu em 20s', CHROME_DEBUG_PORT)
+            log.warning('Chrome iniciado mas porta %d nao respondeu em 20s (tentativa %d/2)',
+                        CHROME_DEBUG_PORT, tentativa)
+        log.error('Chrome debug nao subiu na porta %d apos 2 tentativas (perfil %s). '
+                  'A automacao do SEI/PGT NAO vai funcionar.', CHROME_DEBUG_PORT, chrome_profile)
         return False
     except Exception as e:
         log.error('Erro ao iniciar Chrome: %s', e)
@@ -87,14 +133,28 @@ def abrir_aba_chrome_debug(url):
         return resp.status in (200, 201)
 
 
-def abrir_aba_do_servidor(url=SERVIDOR_URL):
-    """Espera o servidor subir e abre uma aba com o painel no navegador.
+def abas_abertas_chrome_debug():
+    """URLs das abas de pagina abertas na instancia do Chrome debug."""
+    endpoint = f'http://127.0.0.1:{CHROME_DEBUG_PORT}/json/list'
+    try:
+        with urllib.request.urlopen(endpoint, timeout=5) as resp:
+            itens = json.loads(resp.read().decode('utf-8'))
+        return [str(i.get('url') or '') for i in itens if i.get('type') == 'page']
+    except Exception as e:
+        log.debug('Nao foi possivel listar as abas do Chrome debug: %s', e)
+        return []
 
-    Prefere a instancia do Chrome debug (a mesma usada pela automacao) e usa
-    o navegador padrao como fallback. Desativavel com GERADOR_SEI_SEM_ABA=1.
+
+def abrir_aba_do_servidor():
+    """Espera o servidor subir e abre as abas iniciais, NESTA ORDEM:
+    dashboard (painel) -> SEI -> PGT.
+
+    Prefere a instancia do Chrome debug (a mesma usada pela automacao); se ela
+    nao responder, o dashboard cai no navegador padrao. Desativavel com
+    GERADOR_SEI_SEM_ABA=1.
     """
     if os.environ.get('GERADOR_SEI_SEM_ABA'):
-        log.info('GERADOR_SEI_SEM_ABA ativo: aba do painel nao sera aberta')
+        log.info('GERADOR_SEI_SEM_ABA ativo: abas iniciais nao serao abertas')
         return
 
     for _ in range(60):
@@ -102,7 +162,7 @@ def abrir_aba_do_servidor(url=SERVIDOR_URL):
             break
         time.sleep(1)
     else:
-        log.warning('Servidor nao respondeu na porta %d em 60s; aba nao aberta', SERVIDOR_PORTA)
+        log.warning('Servidor nao respondeu na porta %d em 60s; abas nao abertas', SERVIDOR_PORTA)
         return
 
     # A inicializacao do Chrome debug pode levar ate 20s
@@ -111,17 +171,36 @@ def abrir_aba_do_servidor(url=SERVIDOR_URL):
             break
         time.sleep(1)
 
-    for tentativa in range(3):
-        try:
-            if abrir_aba_chrome_debug(url):
-                log.info('Aba do painel aberta no Chrome debug: %s', url)
-                return
-        except Exception as e:
-            log.debug('Tentativa %d de abrir aba via DevTools falhou: %s', tentativa + 1, e)
-        time.sleep(2)
+    abertas = abas_abertas_chrome_debug()
+    for posicao, (alvo, nome, trecho) in enumerate(ABAS_INICIAIS, start=1):
+        if any(trecho in u for u in abertas):
+            log.info('Aba %d/%d (%s) ja estava aberta: %s',
+                     posicao, len(ABAS_INICIAIS), nome, alvo)
+            continue
 
-    log.info('Abrindo painel no navegador padrao: %s', url)
-    webbrowser.open(url)
+        aberta = False
+        for tentativa in range(3):
+            try:
+                if abrir_aba_chrome_debug(alvo):
+                    log.info('Aba %d/%d (%s) aberta no Chrome debug: %s',
+                             posicao, len(ABAS_INICIAIS), nome, alvo)
+                    aberta = True
+                    break
+            except Exception as e:
+                log.debug('Tentativa %d de abrir %s via DevTools falhou: %s',
+                          tentativa + 1, nome, e)
+            time.sleep(2)
+
+        if not aberta and posicao == 1:
+            # Sem Chrome debug o painel ainda abre no navegador padrao
+            log.warning('Chrome debug (porta %d) indisponivel: dashboard aberto no '
+                        'navegador padrao (%s) - a automacao do SEI/PGT NAO vai funcionar',
+                        CHROME_DEBUG_PORT, alvo)
+            webbrowser.open(alvo)
+        elif not aberta:
+            log.warning('Aba %s nao aberta (Chrome debug indisponivel): %s', nome, alvo)
+        # Respeita a ordem pedida: dashboard -> SEI -> PGT
+        time.sleep(1)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -146,58 +225,27 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 init_db()
 log.info('Aplicacao iniciada | DB: %s | Uploads: %s', DB_PATH, app.config['UPLOAD_FOLDER'])
 
-_keepalive_iniciado = False
-KEEPALIVE_CFG_PATH = os.path.join(BASE_DIR, 'keepalive.json')
 
+def iniciar_keepalive_app(alvo='sei', ativo=None, intervalo=None):
+    """Sincroniza o keep-alive de um alvo ('sei'/'pgt') com o banco e garante a thread.
 
-def _ler_keepalive_cfg():
-    """Le a preferencia de keep-alive (sobrevive a reinicios do app)."""
-    try:
-        with open(KEEPALIVE_CFG_PATH, 'r', encoding='utf-8') as f:
-            d = json.load(f)
-        return {'ativo': bool(d.get('ativo', True)),
-                'intervalo': int(d.get('intervalo', KEEPALIVE_INTERVALO))}
-    except Exception:
-        return {'ativo': True, 'intervalo': KEEPALIVE_INTERVALO}
-
-
-def _salvar_keepalive_cfg(ativo, intervalo=None):
-    try:
-        d = _ler_keepalive_cfg()
-        d['ativo'] = bool(ativo)
-        if intervalo:
-            d['intervalo'] = int(intervalo)
-        with open(KEEPALIVE_CFG_PATH, 'w', encoding='utf-8') as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-        return d
-    except Exception as e:
-        log.error('Erro ao salvar config do keep-alive: %s', e)
-        return None
-
-
-def iniciar_keepalive_app(ativo=None, intervalo=None):
-    """Inicia a thread que recarrega a aba do SEI quando o app esta ocioso.
-
-    `ativo=None` usa a preferencia salva; nunca sobrescreve a escolha do
-    usuario quando a thread ja esta rodando.
+    A preferencia mora na tabela `config_keepalive`; `ativo=None` / `intervalo=None`
+    usam o valor gravado, entao a escolha do usuario sobrevive a reinicios.
     """
-    global _keepalive_iniciado
-    cfg = _ler_keepalive_cfg()
+    cfg = ler_keepalive(alvo)
     if ativo is None:
         ativo = cfg['ativo']
     if intervalo is None:
         intervalo = cfg['intervalo']
-    if _keepalive_iniciado:
-        return True
+    intervalo = max(15, int(intervalo) or KEEPALIVE_INTERVALO)
     try:
         from sei import iniciar_keepalive
-        iniciar_keepalive(ativo=ativo, intervalo=int(intervalo))
-        _keepalive_iniciado = True
-        log.info('Keep-alive do SEI %s: recarga a cada %ds quando ocioso',
-                 'ativo' if ativo else 'iniciado porem desativado', intervalo)
+        iniciar_keepalive(ativo=bool(ativo), intervalo=intervalo, alvo=alvo)
+        log.info('Keep-alive do %s %s: recarga a cada %ds quando ocioso',
+                 alvo.upper(), 'ativo' if ativo else 'iniciado porem desativado', intervalo)
         return True
     except Exception as e:
-        log.error('Erro ao iniciar keep-alive: %s\n%s', e, traceback.format_exc())
+        log.error('Erro ao iniciar keep-alive do %s: %s\n%s', alvo.upper(), e, traceback.format_exc())
         return False
 
 
@@ -209,7 +257,9 @@ def processo_principal():
 
 
 if processo_principal():
-    iniciar_keepalive_app()
+    # Preferencia de cada keep-alive vem do banco (tabela config_keepalive)
+    iniciar_keepalive_app(alvo='sei')
+    iniciar_keepalive_app(alvo='pgt')
     # Nao bloqueia o startup: abrir o Chrome debug pode demorar ate 20s
     threading.Thread(target=verificar_chrome_debug, daemon=True).start()
 
@@ -339,35 +389,52 @@ def upload_csv():
         for i, row in enumerate(reader, start=2):
             try:
                 col_cod = find_col(row, 'CODIGO BENEFICIARIO', 'CODIGO DO BENEFICIARIO', 'COD. BENEFICIARIO', 'CODIGO SIPRA', 'COD_SIPRA')
-                col_proc = find_col(row, 'NO PROCESSO SEI', 'PROCESSO SEI', 'PROC SEI', 'PROCESSO')
                 col_nome = find_col(row, 'NOME TITULAR 1', 'BENEFICIARIO', 'NOME')
 
                 cod = row.get(col_cod, '').strip() if col_cod else ''
-                proc = row.get(col_proc, '').strip() if col_proc else ''
                 nome = row.get(col_nome, '').strip() if col_nome else ''
 
                 if cod:
                     chave = cod.strip().upper()
-                    id_existente = existentes.get(chave)
-                    if id_existente:
+                    # O nome e as colunas do CSV moram no processo pai
+                    # (processos_sei); o NUP so entra la quando a Geracao
+                    # criar o processo.
+                    dados_json = json.dumps(
+                        {k: (v or '').strip() for k, v in row.items() if k},
+                        ensure_ascii=False
+                    )
+                    pai = db.execute(
+                        'SELECT id FROM processos_sei WHERE cod_beneficiario = ?',
+                        (cod,)
+                    ).fetchone()
+                    if not pai:
+                        db.execute(
+                            'INSERT INTO processos_sei '
+                            '(cod_beneficiario, nome, dados_csv, status) '
+                            'VALUES (?, ?, ?, NULL)',
+                            (cod, nome or None, dados_json)
+                        )
+                    else:
                         sets, vals = [], []
                         if nome:
                             sets.append('nome = ?')
                             vals.append(nome)
-                        if proc:
-                            sets.append('processo_sei = ?')
-                            vals.append(proc)
+                        if dados_json and dados_json != '{}':
+                            sets.append('dados_csv = ?')
+                            vals.append(dados_json)
                         if sets:
-                            vals.append(id_existente)
+                            vals.append(pai['id'])
                             db.execute(
-                                f'UPDATE anexos_sei SET {", ".join(sets)} WHERE id = ?',
+                                f'UPDATE processos_sei SET {", ".join(sets)} WHERE id = ?',
                                 vals
                             )
+                    if existentes.get(chave):
                         atualizados += 1
                     else:
                         db.execute(
-                            'INSERT INTO anexos_sei (cod_sipra, nome, processo_sei, pdf_anexo, anexado) VALUES (?, ?, ?, ?, 0)',
-                            (cod, nome, proc, '')
+                            'INSERT INTO anexos_sei (cod_sipra, pdf_anexo, anexado) '
+                            'VALUES (?, ?, 0)',
+                            (cod, '')
                         )
                         inseridos += 1
                 else:
@@ -390,7 +457,7 @@ def upload_csv():
         return jsonify({'error': str(e)}), 500
 
 
-# Padrao do codigo SIPRA: duas letras seguidas de digitos (ex.: MS001200000001).
+# Padrao do codigo SIPRA: duas letras seguidas de digitos (ex.: AB001200000001).
 # As bordas impedem pegar pedacos de palavras ("relatorio2024" nao vira "io2024").
 PADRAO_CODIGO = re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{2}\d{4,})(?![A-Za-z0-9])')
 
@@ -403,8 +470,8 @@ def _so_alnum(txt):
 
 
 def _regex_do_codigo(cod_norm):
-    """Regex do codigo com fronteiras: casa "MS 001200000001" e "unidade-familiar-
-    MS001200000001", mas nao "MS001200000001" dentro de "MS0012000000012"."""
+    """Regex do codigo com fronteiras: casa "AB 001200000001" e "unidade-familiar-
+    AB001200000001", mas nao "AB001200000001" dentro de "AB0012000000012"."""
     r = _REGEX_CODIGO.get(cod_norm)
     if r is None:
         partes = re.match(r'^([A-Za-z]+)(\d+)$', cod_norm)
@@ -426,7 +493,7 @@ def extrair_codigo(nome_arquivo, codigos):
 
     1) o codigo do banco casado com fronteiras no nome do arquivo;
     2) o codigo como texto puro no nome, sem depender de separadores
-       (cobre "MS001200000001MARIA.pdf" e prefixos de pasta);
+       (cobre "AB001200000001MARIA.pdf" e prefixos de pasta);
     3) se o codigo nao esta no banco, o token que case com o padrao
        <2 letras><digitos> e devolvido (gera registro novo).
     """
@@ -448,7 +515,7 @@ def extrair_codigo(nome_arquivo, codigos):
             pos = nome_norm.find(cod_norm)
             while pos >= 0:
                 fim = pos + len(cod_norm)
-                # "MS0012000000012" nao pode casar com "MS001200000001"
+                # "AB0012000000012" nao pode casar com "AB001200000001"
                 if fim >= len(nome_norm) or not nome_norm[fim].isdigit():
                     melhor, melhor_len = cod, len(cod_norm)
                     break
@@ -483,8 +550,8 @@ def upload_pdfs():
     db = get_db()
 
     # Codigos vindo do CSV (aba Gerar): {normalizado: original}. A associacao
-    # compara o codigo com o NOME DO ARQUIVO, entao "MS001200000001 - MARIA.pdf"
-    # ou "unidade-familiar-MS001200000001.pdf" caem no mesmo registro.
+    # compara o codigo com o NOME DO ARQUIVO, entao "AB001200000001 - MARIA.pdf"
+    # ou "unidade-familiar-AB001200000001.pdf" caem no mesmo registro.
     codigos_db = {}
     for r in db.execute('SELECT cod_sipra FROM anexos_sei').fetchall():
         cod = str(r['cod_sipra'] or '').strip()
@@ -531,16 +598,25 @@ def upload_pdfs():
 
         if row:
             db.execute(
-                'UPDATE anexos_sei SET pdf_anexo = ?, anexado = 0 WHERE id = ?',
+                'UPDATE anexos_sei SET pdf_anexo = ?, anexado = 0, data_anexo = NULL '
+                'WHERE id = ?',
                 (nome_arquivo, row['id'])
             )
             associados += 1
             resultados.append({'arquivo': nome_arquivo, 'status': 'ok', 'codigo': cod_sipra})
             log.debug('Associado ao registro existente: %s -> %s', nome_arquivo, cod_sipra)
         else:
+            # FK exige processo pai: cria um placeholder (entra na fila da
+            # Geracao quando o CSV carregar os dados dele).
             db.execute(
-                'INSERT INTO anexos_sei (cod_sipra, nome, processo_sei, pdf_anexo, anexado) VALUES (?, ?, ?, ?, 0)',
-                (cod_sipra, '', '', nome_arquivo)
+                'INSERT INTO processos_sei (cod_beneficiario, status) '
+                'SELECT ?, NULL WHERE NOT EXISTS '
+                '(SELECT 1 FROM processos_sei WHERE cod_beneficiario = ?)',
+                (cod_sipra, cod_sipra)
+            )
+            db.execute(
+                'INSERT INTO anexos_sei (cod_sipra, pdf_anexo, anexado) VALUES (?, ?, 0)',
+                (cod_sipra, nome_arquivo)
             )
             codigos_db[_so_alnum(cod_sipra)] = cod_sipra
             novos += 1
@@ -566,16 +642,14 @@ def upload_pdfs():
 def get_registros():
     db = get_db()
     rows = db.execute('''
-        SELECT a.*, 
+        SELECT a.*,
+               pg.nome as nome,
+               pg.processo_sei as processo_sei,
+               pg.dados_csv as dados_csv,
                td.nome as tipo_documento_nome,
-               hl.nome as hipotese_legal_nome,
-               (SELECT pg.processo_gerado FROM processos_gerados pg
-                 WHERE pg.cod_beneficiario = a.cod_sipra
-                   AND pg.status = 1
-                   AND pg.processo_gerado IS NOT NULL
-                   AND pg.processo_gerado <> ''
-                 ORDER BY pg.id DESC LIMIT 1) as processo_gerado
+               hl.nome as hipotese_legal_nome
         FROM anexos_sei a
+        LEFT JOIN processos_sei pg ON pg.cod_beneficiario = a.cod_sipra
         LEFT JOIN tipo_documento td ON a.tipo_documento = td.codigo
         LEFT JOIN hipotese_legal hl ON a.hipotese_legal = hl.codigo
         ORDER BY a.cod_sipra
@@ -585,9 +659,14 @@ def get_registros():
     for r in rows:
         item = dict(r)
         # Mostra o nome ja resolvido; se faltar dado no registro (sem CSV),
-        # mostra o proprio coringa em vez de deixar a coluna vazia.
+        # mostra o proprio coringa em vez de deixar a coluna vazia. Os
+        # coringas aceitam colunas da tabela e do CSV ({{Lote}}, {{Data
+        # Tabela}}, ...), lidas de dados_csv.
         processado = processar_nome_arvore_template(item.get('nome_arvore'), item)
         item['nome_arvore_processado'] = processado or item.get('nome_arvore') or ''
+        # O CSV em bruto nao vai para a interface (susto de payload); ele so
+        # serve para resolver os coringas acima.
+        item.pop('dados_csv', None)
         resultado.append(item)
     return jsonify(resultado)
 
@@ -610,12 +689,21 @@ def atualizar_campo():
         valor = data.get('valor')
         registro_id = data.get('id')
         
-        campos_permitidos = ['nome', 'processo_sei', 'pdf_anexo', 'tipo_documento', 'nome_arvore', 'nivel_acesso', 'hipotese_legal']
-        if campo not in campos_permitidos:
+        campos_pai = ['nome', 'processo_sei']
+        campos_anexo = ['pdf_anexo', 'tipo_documento', 'nome_arvore', 'nivel_acesso', 'hipotese_legal']
+        if campo not in campos_pai + campos_anexo:
             return jsonify({'error': 'Campo nao permitido'}), 400
         
         db = get_db()
-        db.execute(f'UPDATE anexos_sei SET {campo} = ? WHERE id = ?', (valor, registro_id))
+        if campo in campos_pai:
+            # nome/NUP moram no processo pai; o id recebido e do anexo filho
+            db.execute(
+                f'UPDATE processos_sei SET {campo} = ? WHERE cod_beneficiario = '
+                '(SELECT cod_sipra FROM anexos_sei WHERE id = ?)',
+                (valor, registro_id)
+            )
+        else:
+            db.execute(f'UPDATE anexos_sei SET {campo} = ? WHERE id = ?', (valor, registro_id))
         db.commit()
         db.close()
         
@@ -633,7 +721,11 @@ def get_stats():
     com_pdf = db.execute('SELECT COUNT(*) FROM anexos_sei WHERE anexado = 1').fetchone()[0]
     erros = db.execute('SELECT COUNT(*) FROM anexos_sei WHERE anexado = -1').fetchone()[0]
     sem_pdf = total - com_pdf - erros
-    com_processo = db.execute("SELECT COUNT(*) FROM anexos_sei WHERE processo_sei != '' AND processo_sei IS NOT NULL").fetchone()[0]
+    com_processo = db.execute(
+        "SELECT COUNT(*) FROM anexos_sei a "
+        "LEFT JOIN processos_sei pg ON pg.cod_beneficiario = a.cod_sipra "
+        "WHERE TRIM(COALESCE(pg.processo_sei, '')) != ''"
+    ).fetchone()[0]
     db.close()
     return jsonify({
         'total': total,
@@ -674,16 +766,15 @@ def save_config():
             return texto
 
         serie = limpar(cfg.get('serie'))
-        sigilo = limpar(cfg.get('sigilo'), 'R')
         nome_arvore = limpar(cfg.get('nome_arvore'))
         hipotese = limpar(cfg.get('hipotese'))
         nivel = limpar(cfg.get('nivel'), '1')
 
         db = get_db()
         db.execute('DELETE FROM config_anexo')
-        db.execute('''INSERT INTO config_anexo (serie, sigilo, nome_arvore, hipotese, nivel)
-                      VALUES (?, ?, ?, ?, ?)''',
-                   (serie, sigilo, nome_arvore, hipotese, nivel))
+        db.execute('''INSERT INTO config_anexo (serie, nome_arvore, hipotese, nivel)
+                      VALUES (?, ?, ?, ?)''',
+                   (serie, nome_arvore, hipotese, nivel))
 
         # Campo em branco na configuracao NAO apaga o que o registro ja tinha:
         # em massa so entra o que foi preenchido aqui.
@@ -707,8 +798,8 @@ def save_config():
 
         db.commit()
         db.close()
-        log.info('Config salva | serie=%s | sigilo=%s | nome_arvore=%s | hipotese=%s | nivel=%s | registros=%d',
-                 serie, sigilo, nome_arvore, hipotese, nivel, len(rows))
+        log.info('Config salva | serie=%s | nome_arvore=%s | hipotese=%s | nivel=%s | registros=%d',
+                 serie, nome_arvore, hipotese, nivel, len(rows))
         return jsonify({'success': True, 'registros_atualizados': len(rows)})
     except Exception as e:
         log.error('ERRO ao salvar config: %s\n%s', e, traceback.format_exc())
@@ -733,21 +824,17 @@ def get_hipoteses_legais():
 
 @app.route('/api/anexar', methods=['POST'])
 def iniciar_anexacao():
-    from sei import sei_state, run_sei, _fila_ocupada
+    from sei import (sei_state, run_sei, _fila_ocupada, pendencias_anexar,
+                     diagnostico_pendencias)
     if _fila_ocupada():
         return jsonify({'error': 'Outra execucao (gerar/baixar/anexar) ja esta em andamento'}), 409
-    db = get_db()
-    pendentes = db.execute(
-        "SELECT COUNT(*) FROM anexos_sei WHERE anexado IN (0, -1) "
-        "AND pdf_anexo IS NOT NULL AND TRIM(pdf_anexo) != ''"
-    ).fetchone()[0]
-    db.close()
-    if pendentes == 0:
-        return jsonify({'error': 'Nenhum registro com PDF pendente '
-                                 '(carregue o CSV e os PDFs primeiro)'}), 400
+    pendentes = pendencias_anexar()
+    if not pendentes:
+        log.warning('Anexacao recusada: %s', diagnostico_pendencias())
+        return jsonify({'error': diagnostico_pendencias()}), 400
     if not verificar_chrome_debug():
         return jsonify({'error': 'Chrome debug (porta 9222) indisponivel'}), 500
-    log.info('Iniciando anexacao no SEI via API | pendentes=%d', pendentes)
+    log.info('Iniciando anexacao no SEI via API | pendentes=%d', len(pendentes))
     t = threading.Thread(target=run_sei, daemon=True)
     t.start()
     return jsonify({'success': True, 'message': 'Processo iniciado', 'pendentes': pendentes})
@@ -804,7 +891,7 @@ def sei_log():
 def retry_falhas():
     log.info('Resetando registros com falha para retry')
     db = get_db()
-    db.execute("UPDATE anexos_sei SET anexado = 0 WHERE anexado = -1")
+    db.execute("UPDATE anexos_sei SET anexado = 0, data_anexo = NULL WHERE anexado = -1")
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -849,7 +936,7 @@ def _abrir_csv(caminho):
 
 
 def _processar_fila(itens):
-    """Popula processos_gerados a partir de [(nome_arquivo, raw_bytes), ...]."""
+    """Popula processos_sei a partir de [(nome_arquivo, raw_bytes), ...]."""
     db = get_db()
     inseridos = atualizados = ignorados = lidos = 0
     erros = []
@@ -875,7 +962,6 @@ def _processar_fila(itens):
                 cod = pegar('CODIGO BENEFICIARIO', 'CODIGO DO BENEFICIARIO',
                             'COD. BENEFICIARIO', 'CODIGO SIPRA')
                 nome = pegar('NOME TITULAR 1', 'BENEFICIARIO', 'NOME')
-                proc = pegar('NO PROCESSO SEI', 'N PROCESSO SEI', 'NUP', 'PROCESSO SEI')
                 if not cod:
                     ignorados += 1
                     log.warning('CSV %s linha %d: codigo beneficiario vazio', nome_arq, i)
@@ -886,22 +972,24 @@ def _processar_fila(itens):
                     ensure_ascii=False
                 )
                 existe = db.execute(
-                    'SELECT id, status FROM processos_gerados WHERE cod_beneficiario = ?',
+                    'SELECT id, status FROM processos_sei WHERE cod_beneficiario = ?',
                     (cod,)
                 ).fetchone()
                 if not existe:
                     db.execute(
-                        'INSERT INTO processos_gerados '
-                        '(cod_beneficiario, nome, processo_sei_original, dados_csv, status) '
-                        'VALUES (?, ?, ?, ?, 0)',
-                        (cod, nome, proc, dados_json)
+                        'INSERT INTO processos_sei '
+                        '(cod_beneficiario, nome, dados_csv, status) '
+                        'VALUES (?, ?, ?, 0)',
+                        (cod, nome, dados_json)
                     )
                     inseridos += 1
                 elif existe['status'] != 1:
+                    # status NULL = placeholder criado na aba Anexar: vira
+                    # pendente (0) para entrar na fila junto com os demais.
                     db.execute(
-                        'UPDATE processos_gerados SET nome = ?, processo_sei_original = ?, '
-                        'dados_csv = ? WHERE id = ?',
-                        (nome, proc, dados_json, existe['id'])
+                        'UPDATE processos_sei SET nome = ?, dados_csv = ?, '
+                        'status = COALESCE(status, 0) WHERE id = ?',
+                        (nome, dados_json, existe['id'])
                     )
                     atualizados += 1
                 else:
@@ -917,7 +1005,7 @@ def _processar_fila(itens):
 
 
 def carregar_csvs_para_geracao(arquivos=None):
-    """Le os CSV da pasta csv/ e popula a fila processos_gerados."""
+    """Le os CSV da pasta csv/ e popula a fila processos_sei."""
     if not os.path.isdir(CSV_DIR):
         return {'error': f'Pasta nao encontrada: {CSV_DIR}'}
     arquivos = arquivos or listar_csvs()
@@ -1036,7 +1124,7 @@ def gerar_iniciar():
         return jsonify({'error': 'Outra execucao (gerar/baixar/anexar) ja esta em andamento'}), 409
     db = get_db()
     pendentes = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE status IN (0, -1)'
+        'SELECT COUNT(*) FROM processos_sei WHERE status IN (0, -1)'
     ).fetchone()[0]
     cfg = db.execute('SELECT tipo_processo FROM config_geracao LIMIT 1').fetchone()
     db.close()
@@ -1056,13 +1144,13 @@ def gerar_status():
     from sei import gerar_state, keepalive_state
     db = get_db()
     pendentes = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE status IN (0, -1)'
+        'SELECT COUNT(*) FROM processos_sei WHERE status IN (0, -1)'
     ).fetchone()[0]
     gerados = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE status = 1'
+        'SELECT COUNT(*) FROM processos_sei WHERE status = 1'
     ).fetchone()[0]
     falhas = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE status = -1'
+        'SELECT COUNT(*) FROM processos_sei WHERE status = -1'
     ).fetchone()[0]
     db.close()
     return jsonify({
@@ -1111,7 +1199,7 @@ def gerar_exportar():
     """Relatorio CSV (BOM UTF-8, separador ;) com fila, geracao, download e anexo."""
     db = get_db()
     rows = [dict(r) for r in db.execute(
-        'SELECT * FROM processos_gerados ORDER BY id').fetchall()]
+        'SELECT * FROM processos_sei ORDER BY id').fetchall()]
     anexos = {}
     for r in db.execute('SELECT cod_sipra, pdf_anexo, anexado, data_anexo '
                         'FROM anexos_sei').fetchall():
@@ -1155,7 +1243,7 @@ def gerar_exportar():
             [dados.get(c, '') for c in colunas_csv] + [
                 situacao(r.get('status'), 'Gerado', 'Erro'),
                 r.get('erro') or '',
-                r.get('processo_gerado') or '',
+                r.get('processo_sei') or '',
                 r.get('data_geracao') or '',
                 situacao(r.get('download'), 'Baixado', 'Erro'),
                 r.get('erro_download') or '',
@@ -1204,7 +1292,7 @@ def gerar_log():
 @app.route('/api/gerar/registros')
 def gerar_registros():
     db = get_db()
-    rows = db.execute('SELECT * FROM processos_gerados ORDER BY id').fetchall()
+    rows = db.execute('SELECT * FROM processos_sei ORDER BY id').fetchall()
     db.close()
     return jsonify([dict(r) for r in rows])
 
@@ -1212,8 +1300,8 @@ def gerar_registros():
 @app.route('/api/gerar/retry', methods=['POST'])
 def gerar_retry():
     db = get_db()
-    n = db.execute('SELECT COUNT(*) FROM processos_gerados WHERE status = -1').fetchone()[0]
-    db.execute('UPDATE processos_gerados SET status = 0, erro = NULL WHERE status = -1')
+    n = db.execute('SELECT COUNT(*) FROM processos_sei WHERE status = -1').fetchone()[0]
+    db.execute('UPDATE processos_sei SET status = 0, erro = NULL WHERE status = -1')
     db.commit()
     db.close()
     log.info('Retry da geracao: %d registro(s) resetado(s)', n)
@@ -1226,8 +1314,12 @@ def gerar_limpar():
     if _fila_ocupada():
         return jsonify({'error': 'Ha uma execucao em andamento; aguarde terminar'}), 409
     db = get_db()
-    n = db.execute('SELECT COUNT(*) FROM processos_gerados').fetchone()[0]
-    db.execute('DELETE FROM processos_gerados')
+    n = db.execute('SELECT COUNT(*) FROM processos_sei').fetchone()[0]
+    # Filhos primeiro: a FK de anexos_sei impede apagar o processo pai com
+    # anexos ligados (a aba Anexar limpa os dela pelo /api/limpar).
+    db.execute('DELETE FROM anexos_sei WHERE cod_sipra IN '
+               '(SELECT cod_beneficiario FROM processos_sei)')
+    db.execute('DELETE FROM processos_sei')
     db.commit()
     db.close()
     log.info('Fila de geracao limpa: %d registro(s) removido(s)', n)
@@ -1242,11 +1334,11 @@ def gerar_limpar():
 def baixar_status():
     from sei import baixar_state
     db = get_db()
-    total = db.execute('SELECT COUNT(*) FROM processos_gerados').fetchone()[0]
+    total = db.execute('SELECT COUNT(*) FROM processos_sei').fetchone()[0]
     baixados = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE download = 1').fetchone()[0]
+        'SELECT COUNT(*) FROM processos_sei WHERE download = 1').fetchone()[0]
     falhas = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE download = -1').fetchone()[0]
+        'SELECT COUNT(*) FROM processos_sei WHERE download = -1').fetchone()[0]
     db.close()
     return jsonify({
         'rodando': baixar_state["rodando"],
@@ -1280,7 +1372,7 @@ def baixar_iniciar():
         return jsonify({'error': 'Outra execucao (gerar/baixar/anexar) ja esta em andamento'}), 409
     db = get_db()
     pendentes = db.execute(
-        'SELECT COUNT(*) FROM processos_gerados WHERE COALESCE(download, 0) <> 1'
+        'SELECT COUNT(*) FROM processos_sei WHERE COALESCE(download, 0) <> 1'
     ).fetchone()[0]
     db.close()
     if pendentes == 0:
@@ -1313,7 +1405,7 @@ def baixar_cancelar():
         return jsonify({'success': True, 'aguardando': True})
     db = get_db()
     n = db.execute(
-        'UPDATE processos_gerados SET download = 0, erro_download = NULL, '
+        'UPDATE processos_sei SET download = 0, erro_download = NULL, '
         'arquivo_download = NULL, data_download = NULL '
         'WHERE download IS NOT NULL AND download <> 0').rowcount
     db.commit()
@@ -1327,8 +1419,8 @@ def baixar_cancelar():
 @app.route('/api/baixar/retry', methods=['POST'])
 def baixar_retry():
     db = get_db()
-    n = db.execute('SELECT COUNT(*) FROM processos_gerados WHERE download = -1').fetchone()[0]
-    db.execute('UPDATE processos_gerados SET download = 0, erro_download = NULL '
+    n = db.execute('SELECT COUNT(*) FROM processos_sei WHERE download = -1').fetchone()[0]
+    db.execute('UPDATE processos_sei SET download = 0, erro_download = NULL '
                'WHERE download = -1')
     db.commit()
     db.close()
@@ -1338,30 +1430,45 @@ def baixar_retry():
 
 @app.route('/api/keepalive', methods=['GET'])
 def keepalive_get():
-    iniciar_keepalive_app()
-    from sei import keepalive_state
-    return jsonify(keepalive_state)
+    from sei import keepalive_state, keepalive_pgt_state
+    return jsonify({'sei': keepalive_state, 'pgt': keepalive_pgt_state,
+                    'keepalive': keepalive_state})
 
 
 @app.route('/api/keepalive', methods=['POST'])
 def keepalive_post():
-    from sei import keepalive_state, keepalive_uma_vez
+    """Ativa/desativa, muda o intervalo ou recarrega agora (alvo: sei|pgt).
+
+    A preferencia e gravada na tabela `config_keepalive` (banco), nao em JSON.
+    """
+    from sei import KEEPALIVE_ESTADOS, keepalive_state, keepalive_pgt_state, keepalive_uma_vez_alvo
     body = request.get_json(silent=True) or {}
+    alvo = str(body.get('alvo') or 'sei').lower()
+    if alvo not in KEEPALIVE_ESTADOS:
+        alvo = 'sei'
+    state = KEEPALIVE_ESTADOS[alvo]
+
     if 'ativo' in body:
-        keepalive_state['ativo'] = bool(body['ativo'])
-        _salvar_keepalive_cfg(keepalive_state['ativo'], keepalive_state.get('intervalo'))
-        log.info('Keep-alive %s', 'ativado' if keepalive_state['ativo'] else 'desativado')
+        state['ativo'] = bool(body['ativo'])
+        salvar_keepalive(alvo, ativo=state['ativo'])
+        log.info('Keep-alive do %s %s', alvo.upper(),
+                 'ativado' if state['ativo'] else 'desativado')
     if body.get('intervalo'):
         try:
-            keepalive_state['intervalo'] = max(15, int(body['intervalo']))
-            _salvar_keepalive_cfg(keepalive_state['ativo'], keepalive_state['intervalo'])
+            state['intervalo'] = max(15, int(body['intervalo']))
+            salvar_keepalive(alvo, intervalo=state['intervalo'])
+            log.info('Keep-alive do %s: intervalo de %ds', alvo.upper(), state['intervalo'])
         except (TypeError, ValueError):
             pass
-    iniciar_keepalive_app()
+
+    iniciar_keepalive_app(alvo=alvo)
     resultado = None
     if body.get('agora'):
-        resultado = keepalive_uma_vez()
-    return jsonify({'success': True, 'keepalive': keepalive_state, 'resultado': resultado})
+        resultado = keepalive_uma_vez_alvo(alvo)
+    return jsonify({'success': True, alvo: state,
+                    'sei': keepalive_state, 'pgt': keepalive_pgt_state,
+                    'keepalive': keepalive_state,
+                    'resultado': resultado})
 
 
 if __name__ == '__main__':

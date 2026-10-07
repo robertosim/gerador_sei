@@ -18,16 +18,16 @@ Tudo é controlado por um único painel em `http://localhost:5000`, com barra de
 
 ## Funcionalidades Principais
 
-- **Upload de CSV**: importa a planilha (código SIPRA, nome, nº do processo) — **reimportar faz merge** (mantém PDF, status e registros fora do CSV)
-- **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo (**padrão duas letras + dígitos**: `MS001200000001`); o upload reporta `associados / novos / ignorados`
+- **Upload de CSV**: importa a planilha (código SIPRA e nome) — **reimportar faz merge** (mantém PDF, status e registros fora do CSV); o NUP não vem do CSV, é gravado em `processos_sei.processo_sei` pela geração
+- **Upload de PDFs**: carga em lote com associação automática pelo código SIPRA no nome do arquivo (**padrão duas letras + dígitos**: `AB001200000001`); o upload reporta `associados / novos / ignorados`
 - **Geração de Processos**: CSV → processo novo no SEI, com captura do NUP gerado e exportação de relatório consolidado
 - **Downloads da PGT**: baixa o Espelho da Unidade Familiar de cada beneficiário para `Downloads/arquivos_pgt` (pasta criada automaticamente), **reutilizando a aba da PGT já aberta e logada**
 - **Anexação Automatizada**: navegação e preenchimento de formulários no SEI via Playwright
 - **Painel de Controle**: interface em **abas (Gerar | Baixar | Anexar | Log)** com barra de progresso por aba, **passo atual** e **caixa dos últimos erros** em tempo real
-- **Fila inteligente de anexação**: usa o processo do CSV ou, na falta, o **NUP gerado** na aba Gerar
-- **Configuração flexível**: tipo de documento, grau de sigilo (`R=Reservado`, `U=Urgente`, `S=Sigiloso`), hipótese legal e nível de acesso — **Salvar Configurações** grava em `config_anexo` e aplica em massa nos registros (campo em branco mantém o valor que o registro já tinha)
+- **Fila de anexação**: usa o NUP gravado em `processos_sei.processo_sei` (gerado na aba Gerar); registro sem NUP fica de fora da fila até a geração
+- **Configuração flexível**: tipo de documento, hipótese legal e nível de acesso — **Salvar Configurações** grava em `config_anexo` e aplica em massa nos registros (campo em branco mantém o valor que o registro já tinha)
 - **Tratamento de erros**: pausa/cancelamento de cada execução (a pausa segura o robô **no passo atual**), retry dos registros que falharam e **sessão expirada aborta a execução**
-- **Keep-alive**: recarrega a aba do SEI em intervalo configurável para manter a sessão viva
+- **Keep-alive de SEI e PGT**: dois controles independentes no rodapé (ativar/desativar, intervalo e *Recarregar agora*) que mantêm as sessões vivas — a preferência fica gravada na tabela `config_keepalive` (banco SQLite, não em arquivo JSON)
 - **Limpeza por aba**: *Limpar registros* (anexar), *Limpar Tudo* (gerar) e *Limpar log*
 - **Log detalhado**: log unificado de todas as operações (arquivo + aba Log)
 
@@ -90,8 +90,12 @@ playwright install chromium
 chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\ChromeDebug"
 ```
 
-> **Importante**: o Chrome deve estar aberto em modo debug **antes** de iniciar o
-> aplicativo, e é nele que você faz login no SEI (https://sei.incra.gov.br).
+> **O aplicativo inicia o Chrome debug sozinho**: ao rodar (`GeradorSEI.exe` ou
+> `python app.py`) ele verifica a **porta 9222** numa thread separada e, se o
+> Chrome nao estiver em modo debug, abre o Chrome com
+> `--remote-debugging-port=9222` e o perfil `C:\ChromeDebug` (mesmo comando
+> acima). O login no SEI (https://sei.incra.gov.br) é feito nesse Chrome; se a
+> porta ja responder, nada e reaberto.
 
 ### 4. Iniciar o servidor
 
@@ -103,6 +107,11 @@ python app.py
 
 O painel fica disponível em **http://localhost:5000**.
 
+> **Abas abertas na subida do app** (nesta ordem, no Chrome debug):
+> **1. dashboard (painel) → 2. SEI → 3. PGT**. Aba que já existe não é
+> duplicada; sem Chrome debug, só o dashboard cai no navegador padrão.
+> `GERADOR_SEI_SEM_ABA=1` não abre nenhuma aba.
+
 > `iniciar.bat` roda o `check.py`, **encerra qualquer servidor antigo que ocupe a
 > porta 5000** e só então sobe o novo processo — assim o HTML editado é sempre o
 > que aparece no navegador (o servidor também roda com `TEMPLATES_AUTO_RELOAD`).
@@ -113,7 +122,7 @@ O painel fica disponível em **http://localhost:5000**.
 
 ### Aba Gerar — processos
 
-1. Carregue o CSV da aba **Gerar** (código, nome e nº do processo)
+1. Carregue o CSV da aba **Gerar** (código e nome; a coluna de nº do processo é ignorada)
 2. Escolha o **Tipo de Processo**, a especificação, interessados e nível de acesso
 3. Clique em **Iniciar geração**: a barra mostra o % e, abaixo, `gerando X de Y`;
    o botão vira **Pausar**/**Continuar** e o **Cancelar** ao lado encerra a
@@ -133,7 +142,7 @@ O painel fica disponível em **http://localhost:5000**.
 5. **Cancelar** interrompe e **zera o progresso** (os registros ficam na fila);
    **Executar novamente (erros)** recoloca na fila os downloads com falha
 6. Os arquivos vão para `Downloads/arquivos_pgt` com o nome original sugerido pela
-   PGT (ex.: `unidade-familiar-MS001200000001.pdf`); arquivo já existente é
+   PGT (ex.: `unidade-familiar-AB001200000001.pdf`); arquivo já existente é
    **sobrescrito** — o nome nunca ganha sufixo
 
 ### Aba Anexar — documentos no SEI
@@ -143,9 +152,8 @@ O painel fica disponível em **http://localhost:5000**.
    | Campo | Descrição | Valor padrão |
    |-------|-----------|--------------|
    | Tipo do Documento | Série do SEI (Anexo, Relatório, etc.) | Anexo (263) |
-   | Nome na Árvore | Nome exibido na árvore; aceita coringas `{{Código SIPRA}}`, `{{Nome Titular 1}}`… | Espelho SIPRA |
-   | Grau de Sigilo | Reservado, Urgente ou Sigiloso | Reservado |
-   | Hipótese Legal | Fundamentação legal do acesso | Informação Pessoal (Art. 31 da Lei nº 12.527/2011) |
+   | Nome na Árvore | Nome exibido na árvore; aceita coringas `{{Código SIPRA}}`, `{{Nome Titular 1}}` e **colunas do CSV** (ex.: `{{Lote}}`) | Espelho SIPRA |
+   | Hipótese Legal | Fundamentação legal do acesso (só quando o nível **não** é Público) | Informação Pessoal (Art. 31 da Lei nº 12.527/2011) |
    | Nível de Acesso | Público, Restrito ou Sigiloso | Restrito |
 
    **Salvar Configurações** grava os parâmetros em `config_anexo` e atualiza em
@@ -153,20 +161,59 @@ O painel fica disponível em **http://localhost:5000**.
    `hipotese_legal` de todos os registros; um campo deixado em branco **não
    apaga** o valor que o registro já tinha.
 
+   **Coringas `{{...}}`** — valem nos campos *Especificação* e *Nome na Árvore*,
+   na aba Anexar:
+
+   | Origem | Exemplos |
+   |--------|----------|
+   | Campos da tabela | `{{Código SIPRA}}`, `{{Nome}}`, `{{Processo SEI}}`, `{{NUP}}`, `{{PDF Anexo}}`, `{{Nível de Acesso}}` |
+   | Apelidos de titulares | `{{Nome Titular 1}}`, `{{Nome Titular 2}}` |
+   | **Colunas do CSV carregado** | `{{Lote}}`, `{{Data Tabela}}`, `{{NO PROCESSO SEI}}` — qualquer cabeçalho, sem depender de mapeamento |
+
+   A busca ignora maiúsculas/acentos e casa por fragmento (`{{Nome Titular}}`
+   acha `NOME TITULAR 1`). Coringa sem dado fica visível no nome (ex.:
+   `{{Lote}}`); na geração do documento, um segmento vazio — ex.
+   `{{Nome Titular 1}} - {{Nome Titular 2}}` com só um titular — é
+   removido junto com o separador.
+
 2. **1. Carregar CSV** — colunas `CÓDIGO DO BENEFICIÁRIO`, `PROC SEI`,
    `BENEFICIÁRIO` (delimitador `;`, encoding UTF-8 ou CP1252)
 3. **2. Carregar Anexos PDF** — selecione a **pasta** com os PDFs; a associação é
    feita por **expressão regular** comparando o código do CSV com o nome do
-   arquivo. O código segue o padrão **duas letras + dígitos** (`MS001200000001`),
-   então `unidade-familiar-MS001200000001.pdf`, `MS001200000001 - NOME.pdf` e
-   `MS 001200000001.pdf` caem todos no mesmo registro. O nome do PDF associado
+   arquivo. O código segue o padrão **duas letras + dígitos** (`AB001200000001`),
+   então `unidade-familiar-AB001200000001.pdf`, `AB001200000001 - NOME.pdf` e
+   `AB 001200000001.pdf` caem todos no mesmo registro. O nome do PDF associado
    aparece na aba **Anexar**, coluna **PDF Anexo**
-4. Faça login no SEI e clique em **Anexar no SEI**, acompanhando o progresso
+4. Faça login no SEI e clique em **Anexar no SEI**, acompanhando o progresso;
+   no sucesso a linha vira **Anexado** e a coluna **Data Anexo** recebe a
+   data/hora (`AAAA-MM-DD HH:MM:SS`) — em falha, nova tentativa ou PDF
+   substituído, a data é zerada
 5. **Limpar registros** zera a tabela sem apagar os PDFs já enviados
+
+### Keep-alive (rodapé — SEI e PGT)
+
+O rodapé tem **duas linhas independentes**, uma para o **SEI** e outra para o
+**PGT**, cada uma com:
+
+| Controle | O que faz |
+|----------|-----------|
+| **Ativar / Desativar** | liga ou desliga só aquele keep-alive |
+| **a cada N s** | intervalo da recarga (mínimo 15 s) |
+| **Recarregar agora** | recarrega a aba na hora (mesmo com o keep-alive desligado) |
+
+Regras de recarga:
+
+- só roda com o app **ocioso** (nenhuma fila de gerar/baixar/anexar em execução);
+- recarrega a aba **já aberta** no Chrome debug; se não existir, cria uma única
+  vez e reutiliza nas próximas;
+- sessão expirada (redirecionou para login / acesso não autorizado) é reportada
+  no rodapé e no log — refaça o login manualmente;
+- o estado é **gravado no banco** (`config_keepalive`) e sobrevive a reinícios;
+  o antigo `keepalive.json` é migrado na primeira execução e apagado.
 
 ---
 
-## Processo de Anexação (17 passos)
+## Processo de Anexação (16 passos)
 
 | Passo | Ação | Descrição |
 |-------|------|-----------|
@@ -180,26 +227,49 @@ O painel fica disponível em **http://localhost:5000**.
 | 8 | Nome na Árvore | Preenche o nome (ex.: Espelho SIPRA) |
 | 9 | Formato | Seleciona "Nato-digital" |
 | 10 | Nível de Acesso | Público / Restrito / Sigiloso |
-| 11 | Hipótese Legal | Aguarda o carregamento via AJAX e seleciona |
-| 12 | Grau de Sigilo | Define o grau de sigilo |
-| 13 | Hipótese Legal | Confirma a seleção |
-| 14 | Anexar PDF | Faz upload do arquivo PDF |
-| 15 | Salvar | Clica no botão Salvar |
-| 16 | Verificar | Verifica `.infraMensagemErro`/sucesso do SEI (erro reprova o item) |
-| 17 | Confirmar | Pressiona Enter para confirmar |
+| 11 | Hipótese Legal | Aguarda o carregamento via AJAX (ignorado em nível Público) |
+| 12 | Hipótese Legal | Seleciona a hipótese legal (ignorado em nível Público) |
+| 13 | Anexar PDF | Faz upload do arquivo PDF |
+| 14 | Salvar | Clica no botão Salvar |
+| 15 | Verificar | Verifica `.infraMensagemErro`/sucesso do SEI (erro reprova o item) |
+| 16 | Confirmar | Pressiona Enter para confirmar |
 
 ---
 
 ## Banco de Dados
 
-Tabela `anexos_sei` (SQLite):
+Relação principal (chave estrangeira real, `PRAGMA foreign_keys = ON`):
+
+```
+processos_sei (1)  <──────────  (N)  anexos_sei
+             cod_beneficiario          cod_sipra
+```
+
+Tabela `processos_sei` (antes `processos_gerados`; a coluna `processo_gerado`
+virou `processo_sei` e `processo_sei_original`, o NUP do CSV, foi removida):
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
 | id | INTEGER | Chave primária (autoincremento) |
-| cod_sipra | TEXT | Código SIPRA do beneficiário (padrão 2 letras + dígitos) |
-| nome | TEXT | Nome do beneficiário |
-| processo_sei | TEXT | Número do processo SEI |
+| cod_beneficiario | TEXT | Código SIPRA (índice único; é a chave do 1:N com `anexos_sei`) |
+| nome | TEXT | Nome do beneficiário (vem do CSV; é o que a aba Anexar exibe) |
+| dados_csv | TEXT | Linha do CSV em JSON (alimenta os templates da geração) |
+| processo_sei | TEXT | NUP do processo (gerado na aba Gerar; é o NUP exibido na aba Anexar) |
+| status | INTEGER | 0=pendente, 1=gerado, -1=erro; `NULL` = placeholder criado pela aba Anexar (fora da fila) |
+| erro | TEXT | Mensagem da falha de geração |
+| data_geracao | TEXT | Data/hora da geração |
+| download | INTEGER | Estado do download na aba Baixar: 0=pendente, 1=baixado, -1=erro |
+| erro_download | TEXT | Mensagem da falha de download |
+| arquivo_download | TEXT | Arquivo baixado |
+| data_download | TEXT | Data/hora do download |
+
+Tabela `anexos_sei` — um registro por anexo; `nome` e `processo_sei` foram
+removidos daqui (vem do processo pai via JOIN):
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | INTEGER | Chave primária (autoincremento) |
+| cod_sipra | TEXT | Código SIPRA — **FK** para `processos_sei.cod_beneficiario` |
 | pdf_anexo | TEXT | Nome do arquivo PDF associado (vem da aba Anexar) |
 | anexado | INTEGER | Status: 0=pendente, 1=anexado, -1=erro |
 | tipo_documento | INTEGER | Série do SEI gravada pela configuração |
@@ -208,13 +278,17 @@ Tabela `anexos_sei` (SQLite):
 | hipotese_legal | INTEGER | Código da hipótese legal |
 | data_anexo | TEXT | Data/hora da anexação |
 
+Bancos antigos são migrados sozinhos na inicialização (`init_db`):
+`processos_gerados` vira `processos_sei`, `anexos_sei` é recriado com a FK e
+anexos sem processo pai ganham um processo criado a partir da linha antiga.
+
 Há também:
 
-- `config_anexo` — configuração da aba Anexar (`serie`, `sigilo`, `nome_arvore`,
+- `config_anexo` — configuração da aba Anexar (`serie`, `nome_arvore`,
   `hipotese`, `nivel`), regravada a cada *Salvar Configurações*
-- `processos_gerados` — fila de geração da aba Gerar, com o estado dos downloads
-  (`download`, `erro_download`, `arquivo_download`, `data_download`)
 - `config_geracao` — configurações da aba Gerar
+- `config_keepalive` — preferência do keep-alive por alvo (`sei`, `pgt`), com
+  `ativo` e `intervalo`; substitui o antigo `keepalive.json`
 - `tipo_documento` e `hipotese_legal` — tabelas de apoio das séries e hipóteses
 
 ---
@@ -229,7 +303,7 @@ Há também:
 | GET | `/api/stats` | Estatísticas gerais |
 | GET/POST | `/api/config` | Obtém / salva configurações de anexo |
 | GET/POST | `/api/log` | Log unificado (GET) / limpa o log (POST) |
-| GET/POST | `/api/keepalive` | Status / controle do keep-alive |
+| GET/POST | `/api/keepalive` | Estado dos keep-alives (GET: `sei` e `pgt`); POST grava `ativo`/`intervalo` ou recarrega na hora (`agora`) para o alvo `alvo=sei\|pgt` |
 
 ### Anexar
 
@@ -295,7 +369,7 @@ Há também:
 | Chrome não conecta | Verifique se o Chrome está em modo debug (porta 9222) |
 | Interface desatualizada | Use `iniciar.bat` (mata o servidor antigo da porta 5000) |
 | CSV não carrega | Verifique o encoding (UTF-8 ou CP1252) e o delimitador (`;`) |
-| PDF não associa | O nome do arquivo precisa conter o código do CSV no padrão **2 letras + dígitos** (`MS001200000001`), com ou sem separadores |
+| PDF não associa | O nome do arquivo precisa conter o código do CSV no padrão **2 letras + dígitos** (`AB001200000001`), com ou sem separadores |
 | Configuração não salva | Abra as Configurações do Anexo pela própria aba Anexar e clique em **Salvar Configurações**; veja o log em `processos_sei.log` |
 | Download não começa | Sessão expirada na PGT aborta de propósito; refaça o login na aba da PGT |
 | Onde ficam os espelhos | `C:\Users\<usuário>\Downloads\arquivos_pgt` (criada automaticamente ao iniciar o download) |
